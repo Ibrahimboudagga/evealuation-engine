@@ -1,0 +1,5 @@
+{"id": "q1", "input": "What is the capital of France?", "expected_output": "Paris", "metadata": {"category": "geography"}}
+{"id": "q2", "input": "Translate 'hello' to Spanish.", "expected_output": "hola", "metadata": {"category": "translation"}}
+{"id": "q3", "input": "Solve the equation: 2x + 5 = 15. What is x?", "expected_output": "5", "metadata": {"category": "math"}}
+{"id": "q4", "input": "Who wrote 'Romeo and Juliet'?", "expected_output": "William Shakespeare", "metadata": {"category": "literature"}}
+{"id": "q5", "input": "Write a short sentence about space.", "expected_output": "Space is vast and filled with stars.", "metadata": {"category": "creative"}}
