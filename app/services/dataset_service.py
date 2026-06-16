@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import structlog
+from json_repair import repair_json
 from sqlalchemy import or_
 from sqlalchemy.orm import Session, selectinload
 
@@ -292,6 +293,7 @@ class DatasetService:
 
         Each line must be a JSON object with at minimum 'input' and 'expected_output' fields.
         An 'id' field is auto-generated if missing.
+        Uses json_repair to handle malformed JSON lines gracefully.
         """
         examples: List[EvaluationExample] = []
         for line_num, line in enumerate(content.strip().splitlines(), 1):
@@ -299,7 +301,9 @@ class DatasetService:
             if not line_str:
                 continue
             try:
-                data = json.loads(line_str)
+                data = repair_json(line_str, return_objects=True)
+                if not isinstance(data, dict):
+                    raise ValueError(f"Expected a JSON object, got {type(data).__name__}")
                 if "id" not in data:
                     data["id"] = f"example_{line_num}"
                 if "input" not in data or "expected_output" not in data:

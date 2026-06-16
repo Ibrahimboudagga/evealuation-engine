@@ -55,3 +55,30 @@ async def test_llm_judge_evaluator():
     # Mock provider returns score 8 in mock JSON, normalized score should be 0.8
     assert res.score == 0.8
     assert "MOCK OpenAI" in res.metadata["reason"]
+
+
+def test_llm_judge_broken_json_parsing():
+    """Verify that _extract_and_parse_json handles broken JSON via json_repair."""
+    mock_provider = OpenAIProvider(model_name="mock-model")
+    evaluator = LLMAsAJudgeEvaluator(mock_provider)
+
+    # Trailing comma (common LLM mistake)
+    result = evaluator._extract_and_parse_json('{"score": 8, "reason": "good",}')
+    assert result["score"] == 8
+    assert result["reason"] == "good"
+
+    # Missing quotes around keys
+    result = evaluator._extract_and_parse_json("{score: 7, reason: \"ok\"}")
+    assert result["score"] == 7
+
+    # Wrapped in markdown code block
+    result = evaluator._extract_and_parse_json('```json\n{"score": 9, "reason": "great"}\n```')
+    assert result["score"] == 9
+
+    # Extra text around JSON
+    result = evaluator._extract_and_parse_json('Here is the result: {"score": 6, "reason": "fine"} hope this helps')
+    assert result["score"] == 6
+
+    # Single quotes instead of double quotes
+    result = evaluator._extract_and_parse_json("{'score': 5, 'reason': 'meh'}")
+    assert result["score"] == 5

@@ -1,10 +1,11 @@
 import uuid
 import asyncio
 import time
-import json
 import structlog
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+
+from json_repair import repair_json
 
 from app.database.connection import get_db, init_db
 from app.database.models import DatasetDB, DatasetVersionDB, EvaluationRunDB, EvaluationResultDB
@@ -35,7 +36,9 @@ def load_dataset(dataset_path: str) -> List[EvaluationExample]:
             if not line_str:
                 continue
             try:
-                data = json.loads(line_str)
+                data = repair_json(line_str, return_objects=True)
+                if not isinstance(data, dict):
+                    raise ValueError(f"Expected a JSON object, got {type(data).__name__}")
                 # Assign ID if missing
                 if "id" not in data:
                     data["id"] = f"example_{line_num}"
@@ -197,7 +200,9 @@ class EvaluationRunner:
                         line_str = line.strip()
                         if not line_str:
                             continue
-                        data = json.loads(line_str)
+                        data = repair_json(line_str, return_objects=True)
+                        if not isinstance(data, dict):
+                            raise ValueError(f"Expected a JSON object, got {type(data).__name__}")
                         if "id" not in data:
                             data["id"] = f"example_{line_num}"
                         if "input" not in data or "expected_output" not in data:
