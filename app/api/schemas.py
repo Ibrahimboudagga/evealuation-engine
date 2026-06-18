@@ -115,3 +115,82 @@ class DatasetAddVersionRequest(BaseModel):
 class DatasetSetActiveVersionRequest(BaseModel):
     """Request body for setting the active version."""
     version_id: str = Field(..., description="ID of the version to activate")
+
+
+# ── Pairwise Schemas ────────────────────────────────────────
+
+class PairwiseRunRequest(BaseModel):
+    """Request body for triggering a pairwise evaluation run."""
+    dataset_path: str = Field(..., description="Path to the JSONL dataset file")
+    model_a_provider: str = Field(..., description="Model A provider name")
+    model_a_model: str = Field(..., description="Model A model ID")
+    model_a_api_key: Optional[str] = Field(default=None, description="Model A API key")
+    model_a_base_url: Optional[str] = Field(default=None, description="Model A custom base URL")
+    model_b_provider: str = Field(..., description="Model B provider name")
+    model_b_model: str = Field(..., description="Model B model ID")
+    model_b_api_key: Optional[str] = Field(default=None, description="Model B API key")
+    model_b_base_url: Optional[str] = Field(default=None, description="Model B custom base URL")
+    judge_provider: str = Field(..., description="Judge provider name")
+    judge_model: str = Field(..., description="Judge model ID")
+    judge_api_key: Optional[str] = Field(default=None, description="Judge API key")
+    judge_prompt_template: Optional[str] = Field(default=None, description="Custom pairwise judge prompt template")
+    concurrency: int = Field(default=5, ge=1, le=50, description="Maximum parallel comparisons")
+
+
+class PairwiseRunResponse(BaseModel):
+    """Response returned immediately after starting a pairwise run."""
+    run_id: str = Field(..., description="Unique ID of the pairwise run")
+    status: str = Field(default="started", description="Current status of the run")
+
+
+class PairwiseMetrics(BaseModel):
+    """Aggregated pairwise comparison metrics."""
+    total_comparisons: int = Field(..., description="Total number of comparisons")
+    wins_a: int = Field(..., description="Number of wins for model A")
+    wins_b: int = Field(..., description="Number of wins for model B")
+    ties: int = Field(..., description="Number of ties")
+    win_rate_a: float = Field(..., description="Win rate for model A (0.0-1.0)")
+    win_rate_b: float = Field(..., description="Win rate for model B (0.0-1.0)")
+    tie_rate: float = Field(..., description="Tie rate (0.0-1.0)")
+    elo_a: float = Field(..., description="Final Elo rating for model A")
+    elo_b: float = Field(..., description="Final Elo rating for model B")
+    avg_score_a: float = Field(..., description="Average judge score for model A (0.0-1.0)")
+    avg_score_b: float = Field(..., description="Average judge score for model B (0.0-1.0)")
+
+
+class PairwiseComparisonItem(BaseModel):
+    """A single pairwise comparison result."""
+    example_id: str
+    prompt: str
+    response_a: str
+    response_b: str
+    expected_output: str
+    winner: str
+    score_a: float
+    score_b: float
+    judge_reason: str
+    original_order: str
+
+
+class PairwiseRunStatusResponse(BaseModel):
+    """Full status and metrics for a pairwise run."""
+    run_id: str
+    model_a_name: str
+    model_b_name: str
+    status: str
+    metrics: Optional[PairwiseMetrics] = None
+    comparisons: Optional[List[PairwiseComparisonItem]] = None
+    error: Optional[str] = None
+
+
+class PairwiseRunListItem(BaseModel):
+    """Summary entry for listing pairwise runs."""
+    run_id: str
+    model_a_name: str
+    model_b_name: str
+    status: str
+
+
+class PairwiseRunsListResponse(BaseModel):
+    """Response for listing all pairwise runs."""
+    runs: List[PairwiseRunListItem]
