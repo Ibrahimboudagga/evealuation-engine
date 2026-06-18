@@ -1,13 +1,14 @@
 import uuid
 import asyncio
 import time
-import json
 import structlog
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
+from json_repair import repair_json
+
 from app.database.connection import get_db, init_db
-from app.database.models import DatasetDB, EvaluationRunDB, EvaluationResultDB
+from app.database.models import DatasetDB, DatasetVersionDB, EvaluationRunDB, EvaluationResultDB
 from app.evaluators.registry import EvaluatorRegistry
 from app.providers.base import BaseProvider
 from app.schemas.example import EvaluationExample
@@ -35,7 +36,9 @@ def load_dataset(dataset_path: str) -> List[EvaluationExample]:
             if not line_str:
                 continue
             try:
-                data = json.loads(line_str)
+                data = repair_json(line_str, return_objects=True)
+                if not isinstance(data, dict):
+                    raise ValueError(f"Expected a JSON object, got {type(data).__name__}")
                 # Assign ID if missing
                 if "id" not in data:
                     data["id"] = f"example_{line_num}"
@@ -140,40 +143,115 @@ class EvaluationRunner:
                 
             return db_results
 
-    async def run_evaluation(self, dataset_path: str, examples: List[EvaluationExample]) -> str:
+    async def run_evaluation(
+        self,
+        dataset_path: Optional[str] = None,
+        examples: Optional[List[EvaluationExample]] = None,
+        dataset_id: Optional[str] = None,
+        dataset_version_id: Optional[str] = None,
+    ) -> str:
         """
         Runs the evaluation pipeline for the complete list of examples.
+
+        Supports two modes:
+        - Legacy: provide dataset_path and examples (loaded from filesystem).
+        - New: provide dataset_id + dataset_version_id (loaded from DB).
         
-        1. Initializes database tables if they do not exist.
-        2. Records the dataset and evaluation run in the DB.
-        3. Invokes providers and evaluators asynchronously.
-        4. Saves all results and returns the run_id.
+        Args:
+            dataset_path: Path to JSONL file (legacy mode).
+            examples: Pre-loaded examples (legacy mode, required if dataset_path used).
+            dataset_id: UUID of a dataset in the registry (new mode).
+            dataset_version_id: UUID of a specific version (optional, uses active version if not set).
+
+        Returns:
+            The run ID string.
         """
         # Ensure database tables exist
         init_db()
         
-        dataset_name = Path(dataset_path).name
-        dataset_id = str(Path(dataset_path).resolve())
         run_id = str(uuid.uuid4())
         
-        with get_db() as db:
-            # Upsert dataset
-            db_dataset = db.query(DatasetDB).filter(DatasetDB.id == dataset_id).first()
-            if not db_dataset:
-                db_dataset = DatasetDB(id=dataset_id, name=dataset_name)
-                db.add(db_dataset)
+        if dataset_id is not None:
+            # New mode: load from DB
+            with get_db() as db:
+                db_dataset = db.query(DatasetDB).filter(DatasetDB.id == dataset_id).first()
+                if not db_dataset:
+                    raise ValueError(f"Dataset '{dataset_id}' not found.")
+
+                # Resolve version
+                if dataset_version_id:
+                    db_version = db.query(DatasetVersionDB).filter(
+                        DatasetVersionDB.id == dataset_version_id,
+                        DatasetVersionDB.dataset_id == dataset_id,
+                    ).first()
+                else:
+                    db_version = db.query(DatasetVersionDB).filter(
+                        DatasetVersionDB.dataset_id == dataset_id,
+                        DatasetVersionDB.is_active == True,
+                    ).first()
+
+                if not db_version:
+                    raise ValueError(f"No active version found for dataset '{dataset_id}'.")
+
+                # Parse examples from stored content
+                try:
+                    examples = []
+                    for line_num, line in enumerate(db_version.content.strip().splitlines(), 1):
+                        line_str = line.strip()
+                        if not line_str:
+                            continue
+                        data = repair_json(line_str, return_objects=True)
+                        if not isinstance(data, dict):
+                            raise ValueError(f"Expected a JSON object, got {type(data).__name__}")
+                        if "id" not in data:
+                            data["id"] = f"example_{line_num}"
+                        if "input" not in data or "expected_output" not in data:
+                            raise KeyError("Line must contain 'input' and 'expected_output' fields.")
+                        examples.append(EvaluationExample(**data))
+                except Exception as e:
+                    raise ValueError(f"Error parsing stored dataset content: {e}")
+
+                model_name = getattr(self.provider, "model_name", "unknown-model")
+                db_run = EvaluationRunDB(
+                    id=run_id,
+                    dataset_id=db_dataset.id,
+                    dataset_version_id=db_version.id,
+                    model_name=model_name,
+                )
+                db.add(db_run)
                 db.commit()
-                db.refresh(db_dataset)
-                
-            # Create Evaluation Run
-            model_name = getattr(self.provider, "model_name", "unknown-model")
-            db_run = EvaluationRunDB(
-                id=run_id,
-                dataset_id=db_dataset.id,
-                model_name=model_name
-            )
-            db.add(db_run)
-            db.commit()
+        else:
+            # Legacy mode: load from filesystem
+            if examples is None:
+                if dataset_path is None:
+                    raise ValueError("Either dataset_path or dataset_id must be provided.")
+                examples = await asyncio.to_thread(load_dataset, dataset_path)
+
+            dataset_name = Path(dataset_path).name if dataset_path else "unknown"
+            resolved_path = str(Path(dataset_path).resolve()) if dataset_path else "unknown"
+
+            with get_db() as db:
+                # Upsert dataset using resolved path as legacy identifier
+                db_dataset = db.query(DatasetDB).filter(DatasetDB.id == resolved_path).first()
+                if not db_dataset:
+                    db_dataset = DatasetDB(
+                        id=resolved_path,
+                        name=dataset_name,
+                        latest_version_number=0,
+                    )
+                    db.add(db_dataset)
+                    db.commit()
+                    db.refresh(db_dataset)
+                    
+                # Create Evaluation Run
+                model_name = getattr(self.provider, "model_name", "unknown-model")
+                db_run = EvaluationRunDB(
+                    id=run_id,
+                    dataset_id=db_dataset.id,
+                    model_name=model_name
+                )
+                db.add(db_run)
+                db.commit()
             
         # Run examples concurrently
         tasks = [self._run_example(example, run_id) for example in examples]

@@ -1,8 +1,8 @@
-import json
 import re
 import structlog
 from typing import Any, Dict
 from pydantic import BaseModel, Field, ValidationError
+from json_repair import repair_json
 
 from app.evaluators.base import BaseEvaluator
 from app.providers.base import BaseProvider
@@ -51,27 +51,29 @@ You MUST reply ONLY with a JSON object in this format (no markdown formatting, n
         return self._name
 
     def _extract_and_parse_json(self, text: str) -> Dict[str, Any]:
-        """Extracts JSON structure from text, even if wrapped in markdown blocks."""
+        """Extracts JSON structure from text, even if wrapped in markdown blocks.
+        Uses json_repair to handle malformed LLM output gracefully."""
         text = text.strip()
-        
+
         # Try finding markdown JSON block
         json_block_match = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
         if json_block_match:
-            try:
-                return json.loads(json_block_match.group(1))
-            except json.JSONDecodeError:
-                pass
+            result = repair_json(json_block_match.group(1), return_objects=True)
+            if isinstance(result, dict):
+                return result
 
         # Try finding anything between the first '{' and last '}'
         brace_match = re.search(r"(\{.*\})", text, re.DOTALL)
         if brace_match:
-            try:
-                return json.loads(brace_match.group(1))
-            except json.JSONDecodeError:
-                pass
+            result = repair_json(brace_match.group(1), return_objects=True)
+            if isinstance(result, dict):
+                return result
 
-        # Fallback to direct parse
-        return json.loads(text)
+        # Fallback to direct repair
+        result = repair_json(text, return_objects=True)
+        if isinstance(result, dict):
+            return result
+        raise ValueError(f"Unable to parse JSON from LLM response: {text[:200]}")
 
     async def evaluate(
         self, 

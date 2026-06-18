@@ -1,10 +1,13 @@
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 
+# ── Run Schemas ──────────────────────────────────────────────
+
 class RunRequest(BaseModel):
     """Request body for triggering a new evaluation run."""
-    dataset_path: str = Field(..., description="Path to the JSONL dataset file")
+    dataset_path: str = Field(..., description="Path to the JSONL dataset file (legacy)")
     candidate_provider: str = Field(..., description="Candidate provider name (e.g. openai, anthropic, cohere)")
     candidate_model: str = Field(..., description="Candidate model ID / identifier")
     candidate_api_key: Optional[str] = Field(default=None, description="Authentication key for the candidate provider")
@@ -49,12 +52,66 @@ class RunsListResponse(BaseModel):
     runs: List[RunListItem]
 
 
-class DatasetItem(BaseModel):
-    """A single dataset record from the database."""
+# ── Dataset Schemas ──────────────────────────────────────────
+
+class DatasetVersionResponse(BaseModel):
+    """A single dataset version."""
+    id: str = Field(..., description="Version ID")
+    version_number: int = Field(..., description="Sequential version number")
+    example_count: int = Field(..., description="Number of examples in this version")
+    is_active: bool = Field(..., description="Whether this is the current active version")
+    created_at: datetime = Field(..., description="Version creation timestamp")
+
+
+class DatasetResponse(BaseModel):
+    """Full dataset record."""
+    id: str = Field(..., description="Dataset UUID")
+    name: str = Field(..., description="Dataset name")
+    description: Optional[str] = Field(default=None, description="Dataset description")
+    tags: List[str] = Field(default_factory=list, description="Dataset tags")
+    latest_version_number: int = Field(..., description="Latest version number")
+    created_at: datetime = Field(..., description="Creation timestamp")
+    updated_at: datetime = Field(..., description="Last update timestamp")
+    active_version: Optional[DatasetVersionResponse] = Field(default=None, description="Currently active version")
+
+
+class DatasetDetailResponse(BaseModel):
+    """Full dataset details including version history."""
     id: str
     name: str
+    description: Optional[str] = None
+    tags: List[str] = Field(default_factory=list)
+    latest_version_number: int
+    created_at: datetime
+    updated_at: datetime
+    active_version: Optional[DatasetVersionResponse] = None
+    versions: List[DatasetVersionResponse] = Field(default_factory=list)
 
 
-class DatasetsResponse(BaseModel):
+class DatasetCreateRequest(BaseModel):
+    """Request body for creating a dataset from JSONL content."""
+    name: str = Field(..., min_length=1, max_length=255, description="Dataset name")
+    description: Optional[str] = Field(default=None, description="Dataset description")
+    tags: Optional[List[str]] = Field(default=None, description="List of tags")
+    content: str = Field(..., min_length=1, description="JSONL content string (one JSON object per line)")
+
+
+class DatasetDeleteResponse(BaseModel):
+    """Response after deleting a dataset."""
+    message: str
+    id: str
+
+
+class DatasetsListResponse(BaseModel):
     """Response for listing all datasets."""
-    datasets: List[DatasetItem]
+    datasets: List[DatasetResponse]
+
+
+class DatasetAddVersionRequest(BaseModel):
+    """Request body for adding a new version to an existing dataset."""
+    content: str = Field(..., min_length=1, description="JSONL content string for the new version")
+
+
+class DatasetSetActiveVersionRequest(BaseModel):
+    """Request body for setting the active version."""
+    version_id: str = Field(..., description="ID of the version to activate")

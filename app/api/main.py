@@ -2,7 +2,7 @@ import asyncio
 import structlog
 from typing import Dict, Any, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query
 
 from app.api.schemas import (
     RunRequest,
@@ -10,15 +10,22 @@ from app.api.schemas import (
     RunStatusResponse,
     RunListItem,
     RunsListResponse,
-    DatasetItem,
-    DatasetsResponse,
     EvaluatorMetric,
+    DatasetResponse,
+    DatasetDetailResponse,
+    DatasetCreateRequest,
+    DatasetDeleteResponse,
+    DatasetsListResponse,
+    DatasetVersionResponse,
+    DatasetAddVersionRequest,
+    DatasetSetActiveVersionRequest,
 )
 from app.database.connection import get_db, init_db
 from app.database.models import DatasetDB
 from app.evaluators.registry import EvaluatorRegistry
 from app.providers.factory import ProviderFactory
 from app.runners.eval_runner import EvaluationRunner, load_dataset, get_run_metrics
+from app.services.dataset_service import DatasetService
 
 log = structlog.get_logger()
 
@@ -27,11 +34,67 @@ app = FastAPI(title="LLM Evaluation Engine", version="1.0.0")
 # In-memory run tracking: run_id -> {"status": ..., "error": ...}
 _run_store: Dict[str, Dict[str, Any]] = {}
 
+# Service singleton
+_dataset_service = DatasetService()
+
+
+def _dataset_to_response(dataset: DatasetDB) -> DatasetResponse:
+    """Convert a DatasetDB model to a DatasetResponse schema."""
+    active_version = None
+    for v in dataset.versions:
+        if v.is_active:
+            active_version = DatasetVersionResponse(
+                id=v.id,
+                version_number=v.version_number,
+                example_count=v.example_count,
+                is_active=v.is_active,
+                created_at=v.created_at,
+            )
+            break
+    return DatasetResponse(
+        id=dataset.id,
+        name=dataset.name,
+        description=dataset.description,
+        tags=dataset.tags,
+        latest_version_number=dataset.latest_version_number,
+        created_at=dataset.created_at,
+        updated_at=dataset.updated_at,
+        active_version=active_version,
+    )
+
+
+def _dataset_to_detail(dataset: DatasetDB) -> DatasetDetailResponse:
+    """Convert a DatasetDB model to a DatasetDetailResponse schema."""
+    base = _dataset_to_response(dataset)
+    versions = [
+        DatasetVersionResponse(
+            id=v.id,
+            version_number=v.version_number,
+            example_count=v.example_count,
+            is_active=v.is_active,
+            created_at=v.created_at,
+        )
+        for v in dataset.versions
+    ]
+    return DatasetDetailResponse(
+        id=base.id,
+        name=base.name,
+        description=base.description,
+        tags=base.tags,
+        latest_version_number=base.latest_version_number,
+        created_at=base.created_at,
+        updated_at=base.updated_at,
+        active_version=base.active_version,
+        versions=versions,
+    )
+
 
 @app.on_event("startup")
 def startup():
     init_db()
 
+
+# ── Existing Run Endpoints ───────────────────────────────────
 
 @app.post("/runs", response_model=RunResponse)
 async def create_run(req: RunRequest):
@@ -151,10 +214,106 @@ async def list_runs():
     return RunsListResponse(runs=runs)
 
 
-@app.get("/datasets", response_model=DatasetsResponse)
-async def list_datasets():
-    with get_db() as db:
-        datasets = db.query(DatasetDB).all()
-    return DatasetsResponse(
-        datasets=[DatasetItem(id=d.id, name=d.name) for d in datasets]
+# ── Dataset Endpoints ────────────────────────────────────────
+
+@app.get("/datasets", response_model=DatasetsListResponse)
+async def list_datasets(
+    tag: Optional[str] = Query(default=None, description="Filter by tag"),
+    search: Optional[str] = Query(default=None, description="Search by name"),
+):
+    datasets = _dataset_service.list_datasets(tag=tag, search=search)
+    return DatasetsListResponse(
+        datasets=[_dataset_to_response(d) for d in datasets]
     )
+
+
+@app.get("/datasets/{dataset_id}", response_model=DatasetDetailResponse)
+async def get_dataset(dataset_id: str):
+    dataset = _dataset_service.get_dataset(dataset_id)
+    if not dataset:
+        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
+    return _dataset_to_detail(dataset)
+
+
+@app.post("/datasets", response_model=DatasetResponse, status_code=201)
+async def create_dataset(req: DatasetCreateRequest):
+    try:
+        dataset = await asyncio.to_thread(
+            _dataset_service.create_dataset,
+            name=req.name,
+            content_jsonl=req.content,
+            description=req.description,
+            tags=req.tags,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _dataset_to_response(dataset)
+
+
+@app.post("/datasets/upload", response_model=DatasetResponse, status_code=201)
+async def upload_dataset(
+    file: UploadFile = File(..., description="JSONL dataset file"),
+    name: str = Form(..., description="Dataset name"),
+    description: Optional[str] = Form(default=None, description="Dataset description"),
+    tags: Optional[str] = Form(default=None, description="Comma-separated tags"),
+):
+    file_content = await file.read()
+    tag_list = [t.strip() for t in tags.split(",")] if tags else None
+    try:
+        dataset = await asyncio.to_thread(
+            _dataset_service.upload_dataset,
+            name=name,
+            file_content=file_content,
+            filename=file.filename or "upload.jsonl",
+            description=description,
+            tags=tag_list,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _dataset_to_response(dataset)
+
+
+@app.post("/datasets/{dataset_id}/versions", response_model=DatasetVersionResponse, status_code=201)
+async def add_dataset_version(dataset_id: str, req: DatasetAddVersionRequest):
+    try:
+        version = await asyncio.to_thread(
+            _dataset_service.add_version,
+            dataset_id=dataset_id,
+            content_jsonl=req.content,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return DatasetVersionResponse(
+        id=version.id,
+        version_number=version.version_number,
+        example_count=version.example_count,
+        is_active=version.is_active,
+        created_at=version.created_at,
+    )
+
+
+@app.put("/datasets/{dataset_id}/active-version", response_model=DatasetVersionResponse)
+async def set_active_version(dataset_id: str, req: DatasetSetActiveVersionRequest):
+    try:
+        version = await asyncio.to_thread(
+            _dataset_service.set_active_version,
+            dataset_id=dataset_id,
+            version_id=req.version_id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return DatasetVersionResponse(
+        id=version.id,
+        version_number=version.version_number,
+        example_count=version.example_count,
+        is_active=version.is_active,
+        created_at=version.created_at,
+    )
+
+
+@app.delete("/datasets/{dataset_id}", response_model=DatasetDeleteResponse)
+async def delete_dataset(dataset_id: str):
+    deleted = await asyncio.to_thread(_dataset_service.delete_dataset, dataset_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
+    return DatasetDeleteResponse(message="Dataset deleted successfully", id=dataset_id)
