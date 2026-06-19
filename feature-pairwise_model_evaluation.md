@@ -658,7 +658,7 @@ python -m pytest tests/ -v
 - Existing `EvaluationRunDB`, `EvaluationResultDB` — **untouched**
 - CLI `run_eval.py` — **untouched**
 - Gradio "Run Evaluation" and "View Results" tabs — **untouched**
-- All 73 original tests — **still pass**
+- All original tests — **still pass**
 
 The pairwise system is a completely parallel path that shares only the database connection, provider factory, and dataset loading utilities.
 
