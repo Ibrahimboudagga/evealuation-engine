@@ -104,3 +104,50 @@ class EvaluationResultDB(Base):
     @metadata_dict.setter
     def metadata_dict(self, val: Dict[str, Any]) -> None:
         self.metadata_json = json.dumps(val) if val is not None else None
+
+
+class PairwiseRunDB(Base):
+    __tablename__ = "pairwise_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    dataset_id: Mapped[str] = mapped_column(String(36), ForeignKey("datasets.id"), nullable=False)
+    dataset_version_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("dataset_versions.id"), nullable=True)
+    model_a_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    model_b_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    dataset: Mapped[DatasetDB] = relationship()
+    comparisons: Mapped[list["PairwiseComparisonDB"]] = relationship(back_populates="run", cascade="all, delete-orphan")
+
+
+class PairwiseComparisonDB(Base):
+    __tablename__ = "pairwise_comparisons"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(String(36), ForeignKey("pairwise_runs.id"), nullable=False)
+    example_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    response_a: Mapped[str] = mapped_column(Text, nullable=False)
+    response_b: Mapped[str] = mapped_column(Text, nullable=False)
+    expected_output: Mapped[str] = mapped_column(Text, nullable=False)
+    winner: Mapped[str] = mapped_column(String(10), nullable=False)
+    score_a: Mapped[float] = mapped_column(Float, nullable=False)
+    score_b: Mapped[float] = mapped_column(Float, nullable=False)
+    judge_reason: Mapped[str] = mapped_column(Text, nullable=False)
+    original_order: Mapped[str] = mapped_column(String(10), nullable=False)
+    metadata_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    run: Mapped[PairwiseRunDB] = relationship(back_populates="comparisons")
+
+    @property
+    def metadata_dict(self) -> Dict[str, Any]:
+        if not self.metadata_json:
+            return {}
+        try:
+            return json.loads(self.metadata_json)
+        except json.JSONDecodeError:
+            return {}
+
+    @metadata_dict.setter
+    def metadata_dict(self, val: Dict[str, Any]) -> None:
+        self.metadata_json = json.dumps(val) if val is not None else None

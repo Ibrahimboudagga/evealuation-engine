@@ -1,6 +1,6 @@
 # LLM Evaluation Framework
 
-A modular evaluation engine for comparing LLM providers on structured datasets. Supports CLI, REST API, and a Gradio web UI.
+A modular evaluation engine for comparing LLM providers on structured datasets. Supports CLI, REST API, and a Gradio web UI. Features single-model evaluation, pairwise model comparison, and full dataset management with versioning.
 
 ## Features
 
@@ -8,10 +8,12 @@ A modular evaluation engine for comparing LLM providers on structured datasets. 
 - **Mock mode**: Run full pipelines locally without API keys for development and testing.
 - **Async evaluation**: Configurable concurrency via `asyncio` semaphore.
 - **Three evaluators**: Exact match, semantic similarity (sentence-transformers), and LLM-as-a-judge with custom prompt support.
+- **Pairwise evaluation**: Compare two models side-by-side with a judge model, including Elo ratings, win/loss/tie rates, and order randomization to eliminate bias.
+- **Dataset management**: Full CRUD API with versioning, file upload, tagging, and search.
 - **Structured logging**: `structlog`-based logging throughout all modules.
-- **SQLite persistence**: Datasets, runs, and per-example results stored in `evals.db`.
-- **REST API**: FastAPI layer for triggering runs, checking status, and listing datasets.
-- **Web UI**: Gradio interface for interactive evaluation and result browsing.
+- **SQLite persistence**: Datasets (with versions), runs, pairwise runs, and per-example results stored in `evals.db`.
+- **REST API**: FastAPI layer for triggering runs, checking status, managing datasets, and listing results.
+- **Web UI**: Gradio interface with four tabs for interactive evaluation, pairwise comparison, and result browsing.
 - **Pydantic v2**: Typed schemas for settings, examples, results, and API request/response models.
 
 ## Project Structure
@@ -21,11 +23,14 @@ app/
   config.py              # .env-backed settings via pydantic-settings
   database/
     connection.py        # SQLAlchemy engine, sessions, init_db()
-    models.py            # DatasetDB, EvaluationRunDB, EvaluationResultDB
+    models.py            # DatasetDB, DatasetVersionDB, EvaluationRunDB,
+                         # EvaluationResultDB, PairwiseRunDB, PairwiseComparisonDB
   evaluators/
     base.py              # BaseEvaluator abstract class
+    base_pairwise.py     # BasePairwiseEvaluator abstract class
     exact_match.py       # Case-insensitive exact string match
     llm_judge.py         # LLM-as-a-judge with JSON parsing
+    pairwise_judge.py    # Pairwise LLM judge for model comparison
     registry.py          # EvaluatorRegistry (exact_match, similarity, llm_judge)
     similarity.py        # Semantic similarity with sentence-transformers fallback
   providers/
@@ -37,20 +42,26 @@ app/
     factory.py           # ProviderFactory (resolves provider names to classes)
   runners/
     eval_runner.py       # EvaluationRunner, load_dataset(), get_run_metrics()
+    pairwise_runner.py   # PairwiseEvaluationRunner, Elo ratings, pairwise metrics
   schemas/
     example.py           # EvaluationExample
     result.py            # EvaluationResult
+  services/
+    dataset_service.py   # DatasetService (CRUD, versioning, upload, search)
   api/
-    main.py              # FastAPI app (/runs, /runs/{id}, /datasets)
+    main.py              # FastAPI app (runs, pairwise-runs, datasets endpoints)
     schemas.py           # Pydantic v2 request/response models
   ui/
-    gradio_app.py        # Gradio Blocks UI (talks to FastAPI via httpx)
+    gradio_app.py        # Gradio Blocks UI with 4 tabs (talks to FastAPI via httpx)
 datasets/
   sample.jsonl           # Sample 5-example evaluation dataset
 tests/
   conftest.py            # Temporary SQLite database per test
   test_config.py
+  test_dataset_api.py    # Dataset API endpoint tests
+  test_dataset_service.py # Dataset service unit tests
   test_evaluators.py
+  test_pairwise.py       # Pairwise evaluation tests
   test_providers.py
   test_runner.py
 run_eval.py              # CLI entry point
@@ -58,6 +69,7 @@ requirements.txt
 .env.example
 README.md
 PROJECT_DOCUMENTATION.md
+feature-pairwise_model_evaluation.md
 ```
 
 ## Getting Started
@@ -173,7 +185,9 @@ python run_eval.py \
 
 ## REST API
 
-### `POST /runs`
+### Run Endpoints
+
+#### `POST /runs`
 
 Trigger a new evaluation run in the background.
 
@@ -202,7 +216,7 @@ Trigger a new evaluation run in the background.
 }
 ```
 
-### `GET /runs/{run_id}`
+#### `GET /runs/{run_id}`
 
 Get run status and aggregated metrics.
 
@@ -221,7 +235,7 @@ Get run status and aggregated metrics.
 }
 ```
 
-### `GET /runs`
+#### `GET /runs`
 
 List all tracked runs.
 
@@ -236,17 +250,187 @@ List all tracked runs.
 }
 ```
 
-### `GET /datasets`
+---
 
-List all datasets recorded in the database.
+### Pairwise Run Endpoints
+
+#### `POST /pairwise-runs`
+
+Trigger a new pairwise evaluation run comparing two models.
+
+**Request body:**
+
+```json
+{
+  "dataset_path": "datasets/sample.jsonl",
+  "model_a_provider": "openai",
+  "model_a_model": "gpt-4o",
+  "model_a_api_key": "sk-...",
+  "model_b_provider": "openai",
+  "model_b_model": "gpt-4o-mini",
+  "model_b_api_key": "sk-...",
+  "judge_provider": "openai",
+  "judge_model": "gpt-4o",
+  "judge_api_key": "sk-...",
+  "concurrency": 5
+}
+```
+
+**Response (`200`):**
+
+```json
+{
+  "run_id": "uuid-string",
+  "status": "started"
+}
+```
+
+#### `GET /pairwise-runs/{run_id}`
+
+Get pairwise run status, metrics, and optional per-example comparisons.
+
+**Query parameters:**
+- `include_comparisons` (boolean, default `false`) — include detailed per-example results
+
+**Response (`200`):**
+
+```json
+{
+  "run_id": "uuid-string",
+  "model_a_name": "gpt-4o",
+  "model_b_name": "gpt-4o-mini",
+  "status": "completed",
+  "metrics": {
+    "total_comparisons": 50,
+    "wins_a": 35,
+    "wins_b": 10,
+    "ties": 5,
+    "win_rate_a": 0.70,
+    "win_rate_b": 0.20,
+    "tie_rate": 0.10,
+    "elo_a": 1584.2,
+    "elo_b": 1415.8,
+    "avg_score_a": 0.82,
+    "avg_score_b": 0.61
+  },
+  "comparisons": null
+}
+```
+
+#### `GET /pairwise-runs`
+
+List all pairwise runs.
+
+---
+
+### Dataset Endpoints
+
+#### `GET /datasets`
+
+List all datasets with optional filtering.
+
+**Query parameters:**
+- `tag` (string, optional) — filter by tag
+- `search` (string, optional) — search by name
 
 **Response (`200`):**
 
 ```json
 {
   "datasets": [
-    {"id": "C:\\...\\datasets\\sample.jsonl", "name": "sample.jsonl"}
+    {
+      "id": "uuid-string",
+      "name": "sample.jsonl",
+      "description": "A sample dataset",
+      "tags": ["geography", "sample"],
+      "latest_version_number": 1,
+      "created_at": "2025-01-01T00:00:00Z",
+      "updated_at": "2025-01-01T00:00:00Z",
+      "active_version": {
+        "id": "uuid-string",
+        "version_number": 1,
+        "example_count": 5,
+        "is_active": true,
+        "created_at": "2025-01-01T00:00:00Z"
+      }
+    }
   ]
+}
+```
+
+#### `GET /datasets/{dataset_id}`
+
+Get full dataset details including version history.
+
+**Response (`200`):** Same as above plus `versions` array with all versions.
+
+#### `POST /datasets`
+
+Create a new dataset from JSONL content.
+
+**Request body:**
+
+```json
+{
+  "name": "my-dataset",
+  "description": "Test dataset",
+  "tags": ["test"],
+  "content": "{\"input\": \"What is 2+2?\", \"expected_output\": \"4\"}\n{\"input\": \"Capital of France?\", \"expected_output\": \"Paris\"}"
+}
+```
+
+**Response (`201`):** Dataset response object.
+
+#### `POST /datasets/upload`
+
+Upload a JSONL file as a dataset.
+
+**Request:** `multipart/form-data` with fields:
+- `file` — JSONL file
+- `name` — dataset name
+- `description` (optional) — description
+- `tags` (optional) — comma-separated tags
+
+**Response (`201`):** Dataset response object.
+
+#### `POST /datasets/{dataset_id}/versions`
+
+Add a new version to an existing dataset.
+
+**Request body:**
+
+```json
+{
+  "content": "{\"input\": \"New question?\", \"expected_output\": \"New answer\"}"
+}
+```
+
+**Response (`201`):** Version response object.
+
+#### `PUT /datasets/{dataset_id}/active-version`
+
+Set a specific version as active.
+
+**Request body:**
+
+```json
+{
+  "version_id": "uuid-string"
+}
+```
+
+**Response (`200`):** Version response object.
+
+#### `DELETE /datasets/{dataset_id}`
+
+Delete a dataset and all its versions.
+
+**Response (`200`):**
+
+```json
+{
+  "message": "Dataset deleted successfully",
+  "id": "uuid-string"
 }
 ```
 
@@ -254,7 +438,7 @@ List all datasets recorded in the database.
 
 ## Gradio Web UI
 
-The Gradio interface provides two tabs:
+The Gradio interface provides four tabs:
 
 ### Tab 1 -- Run Evaluation
 
@@ -276,6 +460,24 @@ Inputs:
 Enter a Run ID and click **Fetch Results**. The UI queries the API and displays:
 - Run status as text
 - Metrics as a table with columns: Evaluator, Mean Score, Pass Rate, N
+
+### Tab 3 -- Pairwise Evaluation
+
+Compare two models side-by-side on the same dataset.
+
+Inputs:
+- Dataset Path
+- Model A: Provider, Model, API Key, Base URL (optional)
+- Model B: Provider, Model, API Key, Base URL (optional)
+- Judge: Provider, Model, API Key
+- Concurrency (slider, 1-20)
+
+### Tab 4 -- Pairwise Results
+
+Enter a Pairwise Run ID and click **Fetch Results**. Displays:
+- Run status with model names
+- Metrics table: Win Rate A/B, Tie Rate, Elo A/B, Avg Score A/B, Total Comparisons
+- Per-example comparisons table: Example ID, Winner, Score A, Score B, Reason
 
 ---
 
@@ -303,8 +505,9 @@ Legacy syntax (`openai-gpt-4o`, `anthropic-mock`) is also supported by splitting
 | Exact Match | `app/evaluators/exact_match.py` | 0.0 or 1.0 | Case-insensitive trimmed string equality |
 | Semantic Similarity | `app/evaluators/similarity.py` | 0.0 -- 1.0 | Sentence-transformers cosine similarity (falls back to token-overlap) |
 | LLM-as-a-Judge | `app/evaluators/llm_judge.py` | 0.1 -- 1.0 | LLM grades predictions on a 1-10 scale, normalized to 0.1-1.0 |
+| Pairwise Judge | `app/evaluators/pairwise_judge.py` | 0.0 -- 1.0 | LLM compares two model responses, declares winner (A/B/tie) with scores |
 
-All evaluators return `(text, usage)` tuples. Token usage from the judge provider is recorded per result.
+All single-model evaluators return `(text, usage)` tuples. Token usage from the judge provider is recorded per result. The pairwise judge returns a `PairwiseComparisonResult` with winner, scores, and reason.
 
 ---
 
@@ -333,7 +536,16 @@ All settings are in `app/config.py` and loaded from environment variables or `.e
 
 Results are stored in `evals.db` by default. Override `DATABASE_URL` in `.env` to use a different file or another SQLAlchemy-supported backend.
 
-Tables: `datasets`, `evaluation_runs`, `evaluation_results`.
+### Tables
+
+| Table | Description |
+|---|---|
+| `datasets` | Dataset identity, description, tags, and version tracking |
+| `dataset_versions` | Immutable content snapshots for each dataset |
+| `evaluation_runs` | Single-model evaluation run metadata |
+| `evaluation_results` | Per-example evaluator results with token usage |
+| `pairwise_runs` | Pairwise comparison run metadata (two models) |
+| `pairwise_comparisons` | Per-example pairwise comparison results with Elo tracking |
 
 ---
 
@@ -367,6 +579,11 @@ class LengthEvaluator(BaseEvaluator):
         )
 ```
 
+### Adding a Pairwise Evaluator
+
+1. Create `app/evaluators/your_pairwise_evaluator.py` implementing `BasePairwiseEvaluator`.
+2. Use it with `PairwiseEvaluationRunner`.
+
 ---
 
 ## Testing
@@ -398,4 +615,5 @@ pytest>=7.0.0
 pytest-asyncio>=0.21.0
 numpy>=1.20.0
 sentence-transformers>=2.2.0
+json_repair>=0.60.0
 ```
