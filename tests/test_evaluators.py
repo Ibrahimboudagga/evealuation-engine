@@ -1,8 +1,12 @@
 import pytest
+import sys
+from types import SimpleNamespace
+
+import app.evaluators.similarity as similarity_module
 from app.evaluators.exact_match import ExactMatchEvaluator
 from app.evaluators.similarity import SemanticSimilarityEvaluator
 from app.evaluators.llm_judge import LLMAsAJudgeEvaluator
-from app.providers.openai import OpenAIProvider
+from tests.fakes import DeterministicFakeProvider
 
 @pytest.mark.asyncio
 async def test_exact_match_evaluator():
@@ -18,7 +22,22 @@ async def test_exact_match_evaluator():
     assert res2.score == 0.0
 
 @pytest.mark.asyncio
-async def test_semantic_similarity_evaluator():
+async def test_semantic_similarity_evaluator(monkeypatch):
+    class FakeModel:
+        def encode(self, text, convert_to_tensor):
+            return text
+
+    class FakeSimilarity:
+        @staticmethod
+        def cos_sim(expected, prediction):
+            return SimpleNamespace(item=lambda: 0.9 if "Paris" in prediction else 0.1)
+
+    fake_sentence_transformers = SimpleNamespace(
+        SentenceTransformer=lambda _: FakeModel(),
+        util=FakeSimilarity,
+    )
+    monkeypatch.setitem(sys.modules, "sentence_transformers", fake_sentence_transformers)
+    monkeypatch.setattr(similarity_module, "_ST_MODEL", None)
     evaluator = SemanticSimilarityEvaluator()
     assert evaluator.name == "semantic_similarity"
     
@@ -28,7 +47,7 @@ async def test_semantic_similarity_evaluator():
         "The capital of France is Paris.", 
         "Paris is France's capital city."
     )
-    # Even if it falls back or runs real sentence-transformers, it should return a high similarity
+    # Stubbed embeddings keep this test deterministic and independent of a model download.
     assert res1.score > 0.6
     
     # Evaluate completely different sentences
@@ -41,9 +60,8 @@ async def test_semantic_similarity_evaluator():
 
 @pytest.mark.asyncio
 async def test_llm_judge_evaluator():
-    # Setup mock provider which returns JSON for LLM judge prompts
-    mock_provider = OpenAIProvider(model_name="mock-model")
-    evaluator = LLMAsAJudgeEvaluator(mock_provider)
+    # The deterministic provider returns JSON for LLM judge prompts.
+    evaluator = LLMAsAJudgeEvaluator(DeterministicFakeProvider.valid_judge())
     assert evaluator.name == "llm_judge"
     
     res = await evaluator.evaluate(
@@ -52,15 +70,14 @@ async def test_llm_judge_evaluator():
         "George Washington was the first president."
     )
     
-    # Mock provider returns score 8 in mock JSON, normalized score should be 0.8
+    # The deterministic judge returns score 8, normalized to 0.8.
     assert res.score == 0.8
-    assert "MOCK OpenAI" in res.metadata["reason"]
+    assert res.metadata["reason"] == "deterministic judge response"
 
 
 def test_llm_judge_broken_json_parsing():
     """Verify that _extract_and_parse_json handles broken JSON via json_repair."""
-    mock_provider = OpenAIProvider(model_name="mock-model")
-    evaluator = LLMAsAJudgeEvaluator(mock_provider)
+    evaluator = LLMAsAJudgeEvaluator(DeterministicFakeProvider.valid_judge())
 
     # Trailing comma (common LLM mistake)
     result = evaluator._extract_and_parse_json('{"score": 8, "reason": "good",}')

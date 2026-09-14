@@ -1,3 +1,10 @@
+import os
+
+# Tests must not download the sentence-transformer model. The similarity
+# evaluator has a token-overlap fallback, and tests that need embeddings stub
+# that dependency explicitly.
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
