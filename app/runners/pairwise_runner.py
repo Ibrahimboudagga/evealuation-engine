@@ -4,6 +4,7 @@ import math
 import random
 import time
 import structlog
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
@@ -14,9 +15,11 @@ from app.database.models import (
     DatasetDB, DatasetVersionDB,
     PairwiseRunDB, PairwiseComparisonDB,
 )
+from app.errors import sanitize_error
 from app.evaluators.base_pairwise import BasePairwiseEvaluator
 from app.providers.base import BaseProvider
 from app.schemas.example import EvaluationExample
+from app.schemas.outcomes import EvaluationOutcome, RunStatus
 
 log = structlog.get_logger()
 
@@ -68,6 +71,21 @@ class PairwiseEvaluationRunner:
         self.evaluator = pairwise_evaluator
         self.semaphore = asyncio.Semaphore(concurrency_limit)
 
+    def _is_simulated(self) -> bool:
+        providers = [self.provider_a, self.provider_b]
+        if hasattr(self.evaluator, "provider"):
+            providers.append(self.evaluator.provider)
+        return any(getattr(provider, "is_mock", False) for provider in providers)
+
+    def _mark_run_failed(self, run_id: str, error: Exception) -> None:
+        with get_db() as db:
+            run = db.query(PairwiseRunDB).filter(PairwiseRunDB.id == run_id).first()
+            if run:
+                run.status = RunStatus.FAILED.value
+                run.completed_at = datetime.now(timezone.utc)
+                run.error_message = sanitize_error(error)
+                db.commit()
+
     async def _run_example(
         self,
         example: EvaluationExample,
@@ -79,21 +97,48 @@ class PairwiseEvaluationRunner:
             start_time = time.perf_counter()
 
             # Generate predictions from both models concurrently
-            async def _gen(provider: BaseProvider, label: str) -> tuple[str, Optional[Dict]]:
+            async def _gen(provider: BaseProvider, label: str) -> tuple[str, Optional[Dict], Optional[str]]:
                 try:
-                    return await provider.generate(example.input)
+                    prediction, usage = await provider.generate(example.input)
+                    return prediction, usage, None
                 except Exception as e:
-                    log.error(f"failed_to_generate_{label}", example_id=example.id, error=str(e))
-                    return f"[GENERATION FAILURE] Error: {str(e)}", None
+                    error_message = sanitize_error(e)
+                    log.error(f"failed_to_generate_{label}", example_id=example.id, error=error_message)
+                    return "", None, error_message
 
-            (pred_a, usage_a), (pred_b, usage_b) = await asyncio.gather(
+            (pred_a, usage_a, error_a), (pred_b, usage_b, error_b) = await asyncio.gather(
                 _gen(self.provider_a, "model_a"),
                 _gen(self.provider_b, "model_b"),
             )
 
             latency_sec = time.perf_counter() - start_time
 
-            # Randomize presentation order to eliminate bias
+            if error_a or error_b:
+                errors = []
+                if error_a:
+                    errors.append(f"model_a: {error_a}")
+                if error_b:
+                    errors.append(f"model_b: {error_b}")
+                error_message = "; ".join(errors)
+                db_comp = PairwiseComparisonDB(
+                    run_id=run_id,
+                    example_id=example.id,
+                    prompt=example.input,
+                    response_a=pred_a,
+                    response_b=pred_b,
+                    expected_output=example.expected_output,
+                    winner=None,
+                    score_a=None,
+                    score_b=None,
+                    judge_reason="Generation failed; pairwise judging was skipped.",
+                    original_order="AB",
+                    outcome=EvaluationOutcome.GENERATION_ERROR.value,
+                    error_message=error_message,
+                )
+                db_comp.metadata_dict = {"latency_sec": latency_sec}
+                return db_comp
+
+            # Randomize presentation order before judging.
             if random.random() < 0.5:
                 # Normal order: A is position A, B is position B
                 judge_a, judge_b = pred_a, pred_b
@@ -129,11 +174,17 @@ class PairwiseEvaluationRunner:
                 judge_reason = result.reason
                 meta = result.metadata or {}
             else:
-                winner = "tie"
-                score_a = 0.0
-                score_b = 0.0
+                winner = None
+                score_a = None
+                score_b = None
                 judge_reason = "Judge evaluation failed"
-                meta = {}
+                meta = {"error": "Judge evaluation raised an exception"}
+                outcome = EvaluationOutcome.EVALUATION_ERROR
+                error_message = "Judge evaluation raised an exception"
+
+            if result is not None:
+                outcome = result.outcome
+                error_message = sanitize_error(result.error_message) if result.error_message else None
 
             meta["latency_sec"] = latency_sec
             meta["original_order"] = original_order
@@ -150,6 +201,8 @@ class PairwiseEvaluationRunner:
                 score_b=score_b,
                 judge_reason=judge_reason,
                 original_order=original_order,
+                outcome=outcome.value,
+                error_message=error_message,
             )
             db_comp.metadata_dict = meta
             return db_comp
@@ -220,6 +273,9 @@ class PairwiseEvaluationRunner:
                     dataset_version_id=db_version.id,
                     model_a_name=model_a_name,
                     model_b_name=model_b_name,
+                    status=RunStatus.RUNNING.value,
+                    started_at=datetime.now(timezone.utc),
+                    is_simulated=self._is_simulated(),
                 )
                 db.add(db_run)
                 db.commit()
@@ -253,19 +309,28 @@ class PairwiseEvaluationRunner:
                     dataset_id=db_dataset.id,
                     model_a_name=model_a_name,
                     model_b_name=model_b_name,
+                    status=RunStatus.RUNNING.value,
+                    started_at=datetime.now(timezone.utc),
+                    is_simulated=self._is_simulated(),
                 )
                 db.add(db_run)
                 db.commit()
 
-        # Run all pairwise comparisons concurrently
-        tasks = [self._run_example(example, run_id) for example in examples]
-        results = await asyncio.gather(*tasks)
+        try:
+            tasks = [self._run_example(example, run_id) for example in examples]
+            results = await asyncio.gather(*tasks)
 
-        # Filter out None results and insert to DB
-        db_comparisons = [r for r in results if r is not None]
-        with get_db() as db:
-            db.add_all(db_comparisons)
-            db.commit()
+            db_comparisons = [r for r in results if r is not None]
+            with get_db() as db:
+                db.add_all(db_comparisons)
+                run = db.query(PairwiseRunDB).filter(PairwiseRunDB.id == run_id).first()
+                if run:
+                    run.status = RunStatus.COMPLETED.value
+                    run.completed_at = datetime.now(timezone.utc)
+                db.commit()
+        except Exception as e:
+            self._mark_run_failed(run_id, e)
+            raise
 
         return run_id
 
@@ -283,15 +348,23 @@ def get_pairwise_run_metrics(run_id: str) -> Dict[str, Any]:
     if not comparisons:
         return {}
 
-    total = len(comparisons)
-    wins_a = sum(1 for c in comparisons if c.winner == "A")
-    wins_b = sum(1 for c in comparisons if c.winner == "B")
-    ties = sum(1 for c in comparisons if c.winner == "tie")
+    evaluated_comparisons = [
+        comparison
+        for comparison in comparisons
+        if comparison.outcome == EvaluationOutcome.EVALUATED.value and comparison.winner is not None
+    ]
+    if not evaluated_comparisons:
+        return {}
+
+    total = len(evaluated_comparisons)
+    wins_a = sum(1 for c in evaluated_comparisons if c.winner == "A")
+    wins_b = sum(1 for c in evaluated_comparisons if c.winner == "B")
+    ties = sum(1 for c in evaluated_comparisons if c.winner == "tie")
 
     # Compute Elo ratings
     elo_a = ELO_INITIAL
     elo_b = ELO_INITIAL
-    for c in comparisons:
+    for c in evaluated_comparisons:
         if c.winner == "A":
             score_a = 1.0
         elif c.winner == "B":
@@ -300,8 +373,8 @@ def get_pairwise_run_metrics(run_id: str) -> Dict[str, Any]:
             score_a = 0.5
         elo_a, elo_b = _elo_update(elo_a, elo_b, score_a)
 
-    avg_score_a = sum(c.score_a for c in comparisons) / total
-    avg_score_b = sum(c.score_b for c in comparisons) / total
+    avg_score_a = sum(c.score_a for c in evaluated_comparisons if c.score_a is not None) / total
+    avg_score_b = sum(c.score_b for c in evaluated_comparisons if c.score_b is not None) / total
 
     # Get model names from the run
     with get_db() as db:
@@ -346,6 +419,8 @@ def get_pairwise_comparisons(run_id: str) -> List[Dict[str, Any]]:
             "score_b": c.score_b,
             "judge_reason": c.judge_reason,
             "original_order": c.original_order,
+            "outcome": c.outcome,
+            "error_message": c.error_message,
         }
         for c in comparisons
     ]

@@ -6,7 +6,9 @@ from pydantic import BaseModel, Field
 from json_repair import repair_json
 
 from app.evaluators.base_pairwise import BasePairwiseEvaluator, PairwiseComparisonResult
+from app.errors import sanitize_error
 from app.providers.base import BaseProvider
+from app.schemas.outcomes import EvaluationOutcome
 
 log = structlog.get_logger()
 
@@ -111,8 +113,7 @@ You MUST reply ONLY with a JSON object in this format (no markdown formatting, n
 
             # Normalize winner to canonical form
             winner = judge_res.winner.strip().upper()
-            if winner not in ("A", "B", "TIE"):
-                winner = "tie"
+            winner = winner if winner in ("A", "B") else "tie"
 
             # Normalize scores from 1-10 to 0.0-1.0
             normalized_a = judge_res.score_a / 10.0
@@ -123,6 +124,7 @@ You MUST reply ONLY with a JSON object in this format (no markdown formatting, n
                 score_a=normalized_a,
                 score_b=normalized_b,
                 reason=judge_res.reason,
+                outcome=EvaluationOutcome.EVALUATED,
                 metadata={
                     "raw_score_a": judge_res.score_a,
                     "raw_score_b": judge_res.score_b,
@@ -134,13 +136,15 @@ You MUST reply ONLY with a JSON object in this format (no markdown formatting, n
 
         except Exception as e:
             log.error("pairwise_judge_evaluation_failed", raw_response=raw_response, error=str(e))
+            error_message = sanitize_error(e)
             return PairwiseComparisonResult(
-                winner="tie",
-                score_a=0.0,
-                score_b=0.0,
-                reason=f"Judge evaluation failed: {str(e)}",
+                winner=None,
+                score_a=None,
+                score_b=None,
+                reason="Judge evaluation failed; inspect the sanitized error message.",
+                outcome=EvaluationOutcome.EVALUATION_ERROR,
+                error_message=error_message,
                 metadata={
-                    "error": str(e),
-                    "raw_response": raw_response,
+                    "error": error_message,
                 },
             )

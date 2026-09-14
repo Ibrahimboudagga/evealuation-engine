@@ -26,6 +26,11 @@ async def test_fake_provider_can_return_valid_judge_responses():
                         '"reason": "deterministic pairwise judge response"}')
     assert pairwise_usage == {"prompt_tokens": 13, "completion_tokens": 9}
 
+    tie, tie_usage = await DeterministicFakeProvider.valid_pairwise_tie().generate("compare these")
+    assert tie == ('{"winner": "tie", "score_a": 7, "score_b": 7, '
+                   '"reason": "deterministic pairwise tie"}')
+    assert tie_usage == {"prompt_tokens": 13, "completion_tokens": 9}
+
 
 @pytest.mark.asyncio
 async def test_fake_provider_can_return_malformed_json_or_raise():

@@ -6,6 +6,8 @@ from json_repair import repair_json
 
 from app.evaluators.base import BaseEvaluator
 from app.providers.base import BaseProvider
+from app.errors import sanitize_error
+from app.schemas.outcomes import EvaluationOutcome
 from app.schemas.result import EvaluationResult
 
 log = structlog.get_logger()
@@ -115,17 +117,18 @@ You MUST reply ONLY with a JSON object in this format (no markdown formatting, n
         except Exception as e:
             log.error("llm_judge_evaluation_failed", raw_response=raw_response, error=str(e))
             
-            # Graceful error handling: return score 0.0 but capture the failure in metadata
+            error_message = sanitize_error(e)
             return EvaluationResult(
                 example_id="",
                 prompt=input_text,
                 prediction=prediction,
                 expected_output=expected_output,
-                score=0.0,
+                score=None,
                 evaluator_name=self.name,
+                outcome=EvaluationOutcome.EVALUATION_ERROR,
+                error_message=error_message,
                 metadata={
-                    "error": str(e),
-                    "raw_response": raw_response,
+                    "error": error_message,
                     "reason": "Failed to parse judge output or generate response"
                 }
             )
