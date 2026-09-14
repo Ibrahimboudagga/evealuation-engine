@@ -212,7 +212,8 @@ Trigger a new evaluation run in the background.
 ```json
 {
   "run_id": "uuid-string",
-  "status": "started"
+  "status": "queued",
+  "is_simulated": false
 }
 ```
 
@@ -245,7 +246,7 @@ List all tracked runs.
 {
   "runs": [
     {"run_id": "uuid-1", "status": "completed"},
-    {"run_id": "uuid-2", "status": "started"}
+    {"run_id": "uuid-2", "status": "queued"}
   ]
 }
 ```
@@ -281,7 +282,8 @@ Trigger a new pairwise evaluation run comparing two models.
 ```json
 {
   "run_id": "uuid-string",
-  "status": "started"
+  "status": "queued",
+  "is_simulated": false
 }
 ```
 

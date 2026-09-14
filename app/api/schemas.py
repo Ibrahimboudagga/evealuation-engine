@@ -1,6 +1,8 @@
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field
+
+from app.schemas.outcomes import EvaluationOutcome, RunStatus
 
 
 # ── Run Schemas ──────────────────────────────────────────────
@@ -22,7 +24,8 @@ class RunRequest(BaseModel):
 class RunResponse(BaseModel):
     """Response returned immediately after starting a run."""
     run_id: str = Field(..., description="Unique ID of the evaluation run")
-    status: str = Field(default="started", description="Current status of the run")
+    status: RunStatus = Field(default=RunStatus.QUEUED, description="Current lifecycle status")
+    is_simulated: bool = Field(default=False, description="Whether any provider returned simulated output")
 
 
 class EvaluatorMetric(BaseModel):
@@ -36,15 +39,21 @@ class EvaluatorMetric(BaseModel):
 class RunStatusResponse(BaseModel):
     """Full status and metrics for a completed (or running) run."""
     run_id: str
-    status: str
+    status: RunStatus
     metrics: Optional[List[EvaluatorMetric]] = None
     error: Optional[str] = None
+    created_at: Optional[datetime] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    is_simulated: bool = False
 
 
 class RunListItem(BaseModel):
     """Summary entry for listing all runs."""
     run_id: str
-    status: str
+    status: RunStatus
+    created_at: Optional[datetime] = None
+    is_simulated: bool = False
 
 
 class RunsListResponse(BaseModel):
@@ -140,7 +149,8 @@ class PairwiseRunRequest(BaseModel):
 class PairwiseRunResponse(BaseModel):
     """Response returned immediately after starting a pairwise run."""
     run_id: str = Field(..., description="Unique ID of the pairwise run")
-    status: str = Field(default="started", description="Current status of the run")
+    status: RunStatus = Field(default=RunStatus.QUEUED, description="Current lifecycle status")
+    is_simulated: bool = Field(default=False, description="Whether any provider returned simulated output")
 
 
 class PairwiseMetrics(BaseModel):
@@ -165,11 +175,13 @@ class PairwiseComparisonItem(BaseModel):
     response_a: str
     response_b: str
     expected_output: str
-    winner: str
-    score_a: float
-    score_b: float
+    winner: Optional[Literal["A", "B", "tie"]]
+    score_a: Optional[float]
+    score_b: Optional[float]
     judge_reason: str
     original_order: str
+    outcome: EvaluationOutcome
+    error_message: Optional[str] = None
 
 
 class PairwiseRunStatusResponse(BaseModel):
@@ -177,10 +189,14 @@ class PairwiseRunStatusResponse(BaseModel):
     run_id: str
     model_a_name: str
     model_b_name: str
-    status: str
+    status: RunStatus
     metrics: Optional[PairwiseMetrics] = None
     comparisons: Optional[List[PairwiseComparisonItem]] = None
     error: Optional[str] = None
+    created_at: Optional[datetime] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    is_simulated: bool = False
 
 
 class PairwiseRunListItem(BaseModel):
@@ -188,7 +204,9 @@ class PairwiseRunListItem(BaseModel):
     run_id: str
     model_a_name: str
     model_b_name: str
-    status: str
+    status: RunStatus
+    created_at: Optional[datetime] = None
+    is_simulated: bool = False
 
 
 class PairwiseRunsListResponse(BaseModel):

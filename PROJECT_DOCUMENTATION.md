@@ -992,7 +992,7 @@ _run_store: Dict[str, Dict[str, Any]] = {}
 _pairwise_run_store: Dict[str, Dict[str, Any]] = {}
 ```
 
-Keys are run IDs. Values are `{"status": "started"|"completed"|"failed", "error": Optional[str]}`.
+Keys are run IDs. Values retain a lifecycle status (`queued`, `running`, `completed`, `failed`, or `interrupted`), a sanitized optional error, and a simulation flag. The database remains the durable record for completed runs.
 
 ### Startup Behavior
 

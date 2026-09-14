@@ -2,13 +2,17 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, Literal, Optional
 from pydantic import BaseModel, Field
 
+from app.schemas.outcomes import EvaluationOutcome
+
 
 class PairwiseComparisonResult(BaseModel):
     """Result of a single pairwise comparison between two model responses."""
-    winner: Literal["A", "B", "tie"] = Field(..., description="Which response won: A, B, or tie")
-    score_a: float = Field(..., ge=0.0, le=1.0, description="Normalized score for response A (0.0-1.0)")
-    score_b: float = Field(..., ge=0.0, le=1.0, description="Normalized score for response B (0.0-1.0)")
+    winner: Optional[Literal["A", "B", "tie"]] = Field(default=None, description="Which response won, or null when judging failed")
+    score_a: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Normalized score for response A")
+    score_b: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Normalized score for response B")
     reason: str = Field(..., description="Judge's explanation for the comparison outcome")
+    outcome: EvaluationOutcome = Field(default=EvaluationOutcome.EVALUATED, description="Whether judging completed or failed")
+    error_message: Optional[str] = Field(default=None, description="Sanitized error when judging did not complete")
     metadata: Optional[Dict[str, Any]] = Field(default=None, description="Optional metadata")
 
 

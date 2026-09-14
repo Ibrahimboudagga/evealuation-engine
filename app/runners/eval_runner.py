@@ -2,6 +2,7 @@ import uuid
 import asyncio
 import time
 import structlog
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
@@ -9,9 +10,11 @@ from json_repair import repair_json
 
 from app.database.connection import get_db, init_db
 from app.database.models import DatasetDB, DatasetVersionDB, EvaluationRunDB, EvaluationResultDB
+from app.errors import sanitize_error
 from app.evaluators.registry import EvaluatorRegistry
 from app.providers.base import BaseProvider
 from app.schemas.example import EvaluationExample
+from app.schemas.outcomes import EvaluationOutcome, RunStatus
 
 log = structlog.get_logger()
 
@@ -66,6 +69,24 @@ class EvaluationRunner:
         self.registry = registry
         self.semaphore = asyncio.Semaphore(concurrency_limit)
 
+    def _is_simulated(self) -> bool:
+        providers = [self.provider]
+        providers.extend(
+            evaluator.provider
+            for evaluator in self.registry.get_all()
+            if hasattr(evaluator, "provider")
+        )
+        return any(getattr(provider, "is_mock", False) for provider in providers)
+
+    def _mark_run_failed(self, run_id: str, error: Exception) -> None:
+        with get_db() as db:
+            run = db.query(EvaluationRunDB).filter(EvaluationRunDB.id == run_id).first()
+            if run:
+                run.status = RunStatus.FAILED.value
+                run.completed_at = datetime.now(timezone.utc)
+                run.error_message = sanitize_error(error)
+                db.commit()
+
     async def _run_example(self, example: EvaluationExample, run_id: str) -> List[EvaluationResultDB]:
         """
         Runs evaluation for a single example:
@@ -78,17 +99,35 @@ class EvaluationRunner:
             start_time = time.perf_counter()
             prediction = ""
             provider_usage = None
+            generation_error = None
             try:
                 prediction, provider_usage = await self.provider.generate(example.input)
             except Exception as e:
-                log.error("failed_to_generate_prediction", example_id=example.id, error=str(e))
-                prediction = f"[GENERATION FAILURE] Error: {str(e)}"
+                generation_error = sanitize_error(e)
+                log.error("failed_to_generate_prediction", example_id=example.id, error=generation_error)
                 
             latency_sec = time.perf_counter() - start_time
             
             # Run all evaluators concurrently
             eval_tasks = []
             evaluators = self.registry.get_all()
+
+            if generation_error:
+                return [
+                    EvaluationResultDB(
+                        run_id=run_id,
+                        example_id=example.id,
+                        prompt=example.input,
+                        prediction=prediction,
+                        expected_output=example.expected_output,
+                        score=None,
+                        evaluator_name=evaluator.name,
+                        outcome=EvaluationOutcome.GENERATION_ERROR.value,
+                        error_message=generation_error,
+                        metadata_json=None,
+                    )
+                    for evaluator in evaluators
+                ]
             
             for evaluator in evaluators:
                 eval_tasks.append(
@@ -106,17 +145,19 @@ class EvaluationRunner:
             for evaluator, res in zip(evaluators, eval_results):
                 if isinstance(res, Exception):
                     log.error("evaluator_failed", evaluator=evaluator.name, example_id=example.id, error=str(res))
-                    # Create a failure record
+                    error_message = sanitize_error(res)
                     db_res = EvaluationResultDB(
                         run_id=run_id,
                         example_id=example.id,
                         prompt=example.input,
                         prediction=prediction,
                         expected_output=example.expected_output,
-                        score=0.0,
+                        score=None,
                         evaluator_name=evaluator.name,
+                        outcome=EvaluationOutcome.EVALUATION_ERROR.value,
+                        error_message=error_message,
                     )
-                    db_res.metadata_dict = {"error": str(res), "latency_sec": latency_sec}
+                    db_res.metadata_dict = {"error": error_message, "latency_sec": latency_sec}
                     db_results.append(db_res)
                     continue
                 
@@ -135,6 +176,8 @@ class EvaluationRunner:
                     expected_output=res.expected_output,
                     score=res.score,
                     evaluator_name=res.evaluator_name,
+                    outcome=res.outcome.value,
+                    error_message=sanitize_error(res.error_message) if res.error_message else None,
                     prompt_tokens=res.prompt_tokens,
                     completion_tokens=res.completion_tokens,
                 )
@@ -217,6 +260,9 @@ class EvaluationRunner:
                     dataset_id=db_dataset.id,
                     dataset_version_id=db_version.id,
                     model_name=model_name,
+                    status=RunStatus.RUNNING.value,
+                    started_at=datetime.now(timezone.utc),
+                    is_simulated=self._is_simulated(),
                 )
                 db.add(db_run)
                 db.commit()
@@ -248,22 +294,30 @@ class EvaluationRunner:
                 db_run = EvaluationRunDB(
                     id=run_id,
                     dataset_id=db_dataset.id,
-                    model_name=model_name
+                    model_name=model_name,
+                    status=RunStatus.RUNNING.value,
+                    started_at=datetime.now(timezone.utc),
+                    is_simulated=self._is_simulated(),
                 )
                 db.add(db_run)
                 db.commit()
             
-        # Run examples concurrently
-        tasks = [self._run_example(example, run_id) for example in examples]
-        results_nested = await asyncio.gather(*tasks)
-        
-        # Flatten and insert to DB
-        all_results = [res for sublist in results_nested for res in sublist]
-        
-        with get_db() as db:
-            db.add_all(all_results)
-            db.commit()
-            
+        try:
+            tasks = [self._run_example(example, run_id) for example in examples]
+            results_nested = await asyncio.gather(*tasks)
+            all_results = [res for sublist in results_nested for res in sublist]
+
+            with get_db() as db:
+                db.add_all(all_results)
+                run = db.query(EvaluationRunDB).filter(EvaluationRunDB.id == run_id).first()
+                if run:
+                    run.status = RunStatus.COMPLETED.value
+                    run.completed_at = datetime.now(timezone.utc)
+                db.commit()
+        except Exception as e:
+            self._mark_run_failed(run_id, e)
+            raise
+
         return run_id
 
 def get_run_metrics(run_id: str) -> Dict[str, Any]:
@@ -276,14 +330,15 @@ def get_run_metrics(run_id: str) -> Dict[str, Any]:
     if not results:
         return {}
         
-    # Group scores by evaluator
+    # Only completed evaluations have a numeric quality score.
     scores_by_evaluator: Dict[str, List[float]] = {}
     for r in results:
-        scores_by_evaluator.setdefault(r.evaluator_name, []).append(r.score)
+        if r.outcome == EvaluationOutcome.EVALUATED.value and r.score is not None:
+            scores_by_evaluator.setdefault(r.evaluator_name, []).append(r.score)
         
     metrics = {
         "run_id": run_id,
-        "total_examples": len(results) // len(scores_by_evaluator) if scores_by_evaluator else 0,
+        "total_examples": len({result.example_id for result in results}),
         "evaluators": {}
     }
     

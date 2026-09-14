@@ -1,6 +1,5 @@
 import json
 import pytest
-from app.providers.openai import OpenAIProvider
 from app.evaluators.pairwise_judge import PairwiseJudgeEvaluator
 from app.runners.pairwise_runner import (
     PairwiseEvaluationRunner,
@@ -11,6 +10,8 @@ from app.runners.pairwise_runner import (
 )
 from app.database.connection import get_db
 from app.database.models import PairwiseRunDB, PairwiseComparisonDB
+from app.schemas.outcomes import EvaluationOutcome, RunStatus
+from tests.fakes import DeterministicFakeProvider
 
 
 # ── Elo Rating Tests ────────────────────────────────────────
@@ -71,10 +72,10 @@ class TestEloRating:
 
 class TestPairwiseJudgeEvaluator:
     @pytest.mark.asyncio
-    async def test_evaluate_with_mock_provider(self):
-        """Test the full evaluate flow with a mock provider."""
-        provider = OpenAIProvider(model_name="mock-model")
-        evaluator = PairwiseJudgeEvaluator(judge_provider=provider)
+    async def test_evaluate_with_valid_judge_response(self):
+        evaluator = PairwiseJudgeEvaluator(
+            judge_provider=DeterministicFakeProvider.valid_pairwise_judge()
+        )
 
         result = await evaluator.evaluate(
             input_text="What is 2+2?",
@@ -83,17 +84,18 @@ class TestPairwiseJudgeEvaluator:
             response_b="The answer is five.",
         )
 
-        assert result.winner in ("A", "B", "tie")
-        assert 0.0 <= result.score_a <= 1.0
-        assert 0.0 <= result.score_b <= 1.0
+        assert result.winner == "A"
+        assert result.score_a == 0.9
+        assert result.score_b == 0.4
+        assert result.outcome == EvaluationOutcome.EVALUATED
         assert isinstance(result.reason, str)
         assert len(result.reason) > 0
 
     @pytest.mark.asyncio
-    async def test_evaluate_returns_correct_winner(self):
-        """Mock provider returns single-model format, should fail gracefully and return tie."""
-        provider = OpenAIProvider(model_name="mock-model")
-        evaluator = PairwiseJudgeEvaluator(judge_provider=provider)
+    async def test_evaluate_returns_error_for_malformed_judge_response(self):
+        evaluator = PairwiseJudgeEvaluator(
+            judge_provider=DeterministicFakeProvider.malformed_json()
+        )
 
         result = await evaluator.evaluate(
             input_text="test",
@@ -102,15 +104,29 @@ class TestPairwiseJudgeEvaluator:
             response_b="response B",
         )
 
-        # Mock provider returns {"score": 8, "reason": "..."} which doesn't match
-        # PairwiseJudgeResponse schema. Should gracefully degrade to tie with error.
-        assert result.winner == "tie"
+        assert result.winner is None
+        assert result.score_a is None
+        assert result.score_b is None
+        assert result.outcome == EvaluationOutcome.EVALUATION_ERROR
         assert result.metadata is not None
         assert "error" in result.metadata
 
+    @pytest.mark.asyncio
+    async def test_evaluate_preserves_a_valid_tie(self):
+        evaluator = PairwiseJudgeEvaluator(
+            judge_provider=DeterministicFakeProvider.valid_pairwise_tie()
+        )
+
+        result = await evaluator.evaluate("test", "expected", "A", "B")
+
+        assert result.winner == "tie"
+        assert result.score_a == result.score_b == 0.7
+        assert result.outcome == EvaluationOutcome.EVALUATED
+
     def test_name_property(self):
-        provider = OpenAIProvider(model_name="mock-model")
-        evaluator = PairwiseJudgeEvaluator(judge_provider=provider)
+        evaluator = PairwiseJudgeEvaluator(
+            judge_provider=DeterministicFakeProvider.valid_pairwise_judge()
+        )
         assert evaluator.name == "pairwise_judge"
 
 
@@ -133,11 +149,12 @@ def temp_jsonl(tmp_path):
 class TestPairwiseEvaluationRunner:
     @pytest.mark.asyncio
     async def test_run_pairwise_evaluation(self, temp_jsonl):
-        """Run a full pairwise evaluation with mock providers."""
-        provider_a = OpenAIProvider(model_name="mock-model-a")
-        provider_b = OpenAIProvider(model_name="mock-model-b")
-        judge_provider = OpenAIProvider(model_name="mock-judge")
-        evaluator = PairwiseJudgeEvaluator(judge_provider=judge_provider)
+        """Run a full pairwise evaluation with deterministic providers."""
+        provider_a = DeterministicFakeProvider.successful()
+        provider_b = DeterministicFakeProvider.successful()
+        evaluator = PairwiseJudgeEvaluator(
+            judge_provider=DeterministicFakeProvider.valid_pairwise_judge()
+        )
 
         runner = PairwiseEvaluationRunner(
             provider_a=provider_a,
@@ -154,6 +171,9 @@ class TestPairwiseEvaluationRunner:
             runs = db.query(PairwiseRunDB).all()
             assert len(runs) == 1
             assert runs[0].id == run_id
+            assert runs[0].status == RunStatus.COMPLETED.value
+            assert runs[0].started_at is not None
+            assert runs[0].completed_at is not None
 
             comparisons = db.query(PairwiseComparisonDB).all()
             assert len(comparisons) == 2
@@ -163,14 +183,16 @@ class TestPairwiseEvaluationRunner:
                 assert 0.0 <= comp.score_a <= 1.0
                 assert 0.0 <= comp.score_b <= 1.0
                 assert comp.original_order in ("AB", "BA")
+                assert comp.outcome == EvaluationOutcome.EVALUATED.value
 
     @pytest.mark.asyncio
     async def test_pairwise_metrics(self, temp_jsonl):
         """Verify computed metrics are valid."""
-        provider_a = OpenAIProvider(model_name="mock-model-a")
-        provider_b = OpenAIProvider(model_name="mock-model-b")
-        judge_provider = OpenAIProvider(model_name="mock-judge")
-        evaluator = PairwiseJudgeEvaluator(judge_provider=judge_provider)
+        provider_a = DeterministicFakeProvider.successful()
+        provider_b = DeterministicFakeProvider.successful()
+        evaluator = PairwiseJudgeEvaluator(
+            judge_provider=DeterministicFakeProvider.valid_pairwise_judge()
+        )
 
         runner = PairwiseEvaluationRunner(
             provider_a=provider_a,
@@ -195,10 +217,11 @@ class TestPairwiseEvaluationRunner:
     @pytest.mark.asyncio
     async def test_pairwise_comparisons(self, temp_jsonl):
         """Verify individual comparisons are retrievable."""
-        provider_a = OpenAIProvider(model_name="mock-model-a")
-        provider_b = OpenAIProvider(model_name="mock-model-b")
-        judge_provider = OpenAIProvider(model_name="mock-judge")
-        evaluator = PairwiseJudgeEvaluator(judge_provider=judge_provider)
+        provider_a = DeterministicFakeProvider.successful()
+        provider_b = DeterministicFakeProvider.successful()
+        evaluator = PairwiseJudgeEvaluator(
+            judge_provider=DeterministicFakeProvider.valid_pairwise_judge()
+        )
 
         runner = PairwiseEvaluationRunner(
             provider_a=provider_a,
@@ -224,10 +247,11 @@ class TestPairwiseEvaluationRunner:
     @pytest.mark.asyncio
     async def test_order_randomization(self, temp_jsonl):
         """Verify that original_order is recorded for each comparison."""
-        provider_a = OpenAIProvider(model_name="mock-model-a")
-        provider_b = OpenAIProvider(model_name="mock-model-b")
-        judge_provider = OpenAIProvider(model_name="mock-judge")
-        evaluator = PairwiseJudgeEvaluator(judge_provider=judge_provider)
+        provider_a = DeterministicFakeProvider.successful()
+        provider_b = DeterministicFakeProvider.successful()
+        evaluator = PairwiseJudgeEvaluator(
+            judge_provider=DeterministicFakeProvider.valid_pairwise_judge()
+        )
 
         runner = PairwiseEvaluationRunner(
             provider_a=provider_a,

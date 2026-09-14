@@ -4,6 +4,8 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import String, Text, Float, DateTime, Integer, Boolean, ForeignKey
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
+from app.schemas.outcomes import EvaluationOutcome, RunStatus
+
 
 class Base(DeclarativeBase):
     pass
@@ -70,6 +72,11 @@ class EvaluationRunDB(Base):
     dataset_version_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("dataset_versions.id"), nullable=True)
     model_name: Mapped[str] = mapped_column(String(255), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    status: Mapped[str] = mapped_column(String(20), default=RunStatus.QUEUED.value, nullable=False)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    is_simulated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     dataset: Mapped[DatasetDB] = relationship(back_populates="runs")
     results: Mapped[list["EvaluationResultDB"]] = relationship(back_populates="run", cascade="all, delete-orphan")
@@ -84,8 +91,10 @@ class EvaluationResultDB(Base):
     prompt: Mapped[str] = mapped_column(Text, nullable=False)
     prediction: Mapped[str] = mapped_column(Text, nullable=False)
     expected_output: Mapped[str] = mapped_column(Text, nullable=False)
-    score: Mapped[float] = mapped_column(Float, nullable=False)
+    score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     evaluator_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    outcome: Mapped[str] = mapped_column(String(30), default=EvaluationOutcome.EVALUATED.value, nullable=False)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     metadata_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     prompt_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     completion_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
@@ -115,6 +124,11 @@ class PairwiseRunDB(Base):
     model_a_name: Mapped[str] = mapped_column(String(255), nullable=False)
     model_b_name: Mapped[str] = mapped_column(String(255), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    status: Mapped[str] = mapped_column(String(20), default=RunStatus.QUEUED.value, nullable=False)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    is_simulated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     dataset: Mapped[DatasetDB] = relationship()
     comparisons: Mapped[list["PairwiseComparisonDB"]] = relationship(back_populates="run", cascade="all, delete-orphan")
@@ -130,11 +144,13 @@ class PairwiseComparisonDB(Base):
     response_a: Mapped[str] = mapped_column(Text, nullable=False)
     response_b: Mapped[str] = mapped_column(Text, nullable=False)
     expected_output: Mapped[str] = mapped_column(Text, nullable=False)
-    winner: Mapped[str] = mapped_column(String(10), nullable=False)
-    score_a: Mapped[float] = mapped_column(Float, nullable=False)
-    score_b: Mapped[float] = mapped_column(Float, nullable=False)
+    winner: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    score_a: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    score_b: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     judge_reason: Mapped[str] = mapped_column(Text, nullable=False)
     original_order: Mapped[str] = mapped_column(String(10), nullable=False)
+    outcome: Mapped[str] = mapped_column(String(30), default=EvaluationOutcome.EVALUATED.value, nullable=False)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     metadata_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     run: Mapped[PairwiseRunDB] = relationship(back_populates="comparisons")
