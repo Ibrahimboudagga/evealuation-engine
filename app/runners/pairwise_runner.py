@@ -86,6 +86,82 @@ class PairwiseEvaluationRunner:
                 run.error_message = sanitize_error(error)
                 db.commit()
 
+    def _mark_run_interrupted(self, run_id: str) -> None:
+        with get_db() as db:
+            run = db.query(PairwiseRunDB).filter(PairwiseRunDB.id == run_id).first()
+            if run:
+                run.status = RunStatus.INTERRUPTED.value
+                run.completed_at = datetime.now(timezone.utc)
+                run.error_message = "Execution interrupted."
+                db.commit()
+
+    def create_run(
+        self,
+        dataset_path: Optional[str] = None,
+        dataset_id: Optional[str] = None,
+        dataset_version_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+    ) -> str:
+        """Persist a queued pairwise run before comparison work begins."""
+        init_db()
+        run_id = run_id or str(uuid.uuid4())
+
+        with get_db() as db:
+            existing_run = db.query(PairwiseRunDB).filter(PairwiseRunDB.id == run_id).first()
+            if existing_run:
+                return run_id
+
+            if dataset_id is not None:
+                db_dataset = db.query(DatasetDB).filter(DatasetDB.id == dataset_id).first()
+                if not db_dataset:
+                    raise ValueError(f"Dataset '{dataset_id}' not found.")
+                if dataset_version_id:
+                    db_version = db.query(DatasetVersionDB).filter(
+                        DatasetVersionDB.id == dataset_version_id,
+                        DatasetVersionDB.dataset_id == dataset_id,
+                    ).first()
+                else:
+                    db_version = db.query(DatasetVersionDB).filter(
+                        DatasetVersionDB.dataset_id == dataset_id,
+                        DatasetVersionDB.is_active == True,
+                    ).first()
+                if not db_version:
+                    raise ValueError(f"No active version found for dataset '{dataset_id}'.")
+                db_run = PairwiseRunDB(
+                    id=run_id,
+                    dataset_id=db_dataset.id,
+                    dataset_version_id=db_version.id,
+                    model_a_name=getattr(self.provider_a, "model_name", "unknown-model-a"),
+                    model_b_name=getattr(self.provider_b, "model_name", "unknown-model-b"),
+                    status=RunStatus.QUEUED.value,
+                    is_simulated=self._is_simulated(),
+                )
+            else:
+                if dataset_path is None:
+                    raise ValueError("Either dataset_path or dataset_id must be provided.")
+                resolved_path = str(Path(dataset_path).resolve())
+                db_dataset = db.query(DatasetDB).filter(DatasetDB.id == resolved_path).first()
+                if not db_dataset:
+                    db_dataset = DatasetDB(
+                        id=resolved_path,
+                        name=Path(dataset_path).name,
+                        latest_version_number=0,
+                    )
+                    db.add(db_dataset)
+                    db.flush()
+                db_run = PairwiseRunDB(
+                    id=run_id,
+                    dataset_id=db_dataset.id,
+                    model_a_name=getattr(self.provider_a, "model_name", "unknown-model-a"),
+                    model_b_name=getattr(self.provider_b, "model_name", "unknown-model-b"),
+                    status=RunStatus.QUEUED.value,
+                    is_simulated=self._is_simulated(),
+                )
+
+            db.add(db_run)
+            db.commit()
+        return run_id
+
     async def _run_example(
         self,
         example: EvaluationExample,
@@ -213,6 +289,37 @@ class PairwiseEvaluationRunner:
         examples: Optional[List[EvaluationExample]] = None,
         dataset_id: Optional[str] = None,
         dataset_version_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+    ) -> str:
+        """Create or reuse a queued pairwise run, then execute its lifecycle."""
+        run_id = self.create_run(
+            dataset_path=dataset_path,
+            dataset_id=dataset_id,
+            dataset_version_id=dataset_version_id,
+            run_id=run_id,
+        )
+        try:
+            return await self._execute_pairwise_evaluation(
+                dataset_path=dataset_path,
+                examples=examples,
+                dataset_id=dataset_id,
+                dataset_version_id=dataset_version_id,
+                run_id=run_id,
+            )
+        except asyncio.CancelledError:
+            self._mark_run_interrupted(run_id)
+            raise
+        except Exception as e:
+            self._mark_run_failed(run_id, e)
+            raise
+
+    async def _execute_pairwise_evaluation(
+        self,
+        dataset_path: Optional[str] = None,
+        examples: Optional[List[EvaluationExample]] = None,
+        dataset_id: Optional[str] = None,
+        dataset_version_id: Optional[str] = None,
+        run_id: str = "",
     ) -> str:
         """
         Runs the pairwise evaluation pipeline.
@@ -224,9 +331,6 @@ class PairwiseEvaluationRunner:
         Returns:
             The run ID string.
         """
-        init_db()
-        run_id = str(uuid.uuid4())
-
         if dataset_id is not None:
             # New mode: load from DB
             with get_db() as db:
@@ -265,19 +369,9 @@ class PairwiseEvaluationRunner:
                 except Exception as e:
                     raise ValueError(f"Error parsing stored dataset content: {e}")
 
-                model_a_name = getattr(self.provider_a, "model_name", "unknown-model-a")
-                model_b_name = getattr(self.provider_b, "model_name", "unknown-model-b")
-                db_run = PairwiseRunDB(
-                    id=run_id,
-                    dataset_id=db_dataset.id,
-                    dataset_version_id=db_version.id,
-                    model_a_name=model_a_name,
-                    model_b_name=model_b_name,
-                    status=RunStatus.RUNNING.value,
-                    started_at=datetime.now(timezone.utc),
-                    is_simulated=self._is_simulated(),
-                )
-                db.add(db_run)
+                db_run = db.query(PairwiseRunDB).filter(PairwiseRunDB.id == run_id).one()
+                db_run.status = RunStatus.RUNNING.value
+                db_run.started_at = datetime.now(timezone.utc)
                 db.commit()
         else:
             # Legacy mode: load from filesystem
@@ -302,18 +396,9 @@ class PairwiseEvaluationRunner:
                     db.commit()
                     db.refresh(db_dataset)
 
-                model_a_name = getattr(self.provider_a, "model_name", "unknown-model-a")
-                model_b_name = getattr(self.provider_b, "model_name", "unknown-model-b")
-                db_run = PairwiseRunDB(
-                    id=run_id,
-                    dataset_id=db_dataset.id,
-                    model_a_name=model_a_name,
-                    model_b_name=model_b_name,
-                    status=RunStatus.RUNNING.value,
-                    started_at=datetime.now(timezone.utc),
-                    is_simulated=self._is_simulated(),
-                )
-                db.add(db_run)
+                db_run = db.query(PairwiseRunDB).filter(PairwiseRunDB.id == run_id).one()
+                db_run.status = RunStatus.RUNNING.value
+                db_run.started_at = datetime.now(timezone.utc)
                 db.commit()
 
         try:
@@ -328,6 +413,9 @@ class PairwiseEvaluationRunner:
                     run.status = RunStatus.COMPLETED.value
                     run.completed_at = datetime.now(timezone.utc)
                 db.commit()
+        except asyncio.CancelledError:
+            self._mark_run_interrupted(run_id)
+            raise
         except Exception as e:
             self._mark_run_failed(run_id, e)
             raise

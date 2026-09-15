@@ -197,7 +197,7 @@ flowchart TD
 - **Service layer**: `DatasetService` encapsulates dataset CRUD, versioning, and search logic.
 - **Repository-like persistence boundary**: Database access is grouped through SQLAlchemy models and session helpers.
 - **Typed schema boundary**: Pydantic models validate input and output data between layers.
-- **In-memory run tracking**: The API layer tracks run status in a dict, with fallback to database for CLI-initiated runs.
+- **Database-backed run tracking**: The database is the source of truth for queued, running, completed, failed, and interrupted runs from the API and CLI.
 
 ## 5. Runtime Execution Flow
 
@@ -228,7 +228,7 @@ flowchart TD
 4. Candidate and evaluator providers are created through `ProviderFactory`.
 5. A pre-assigned run ID is returned immediately to the caller.
 6. The actual evaluation runs as a background task via `asyncio.create_task`.
-7. On completion, the run status is updated in the in-memory store.
+7. The same database record moves through `queued`, `running`, and its terminal status.
 8. The user polls `GET /runs/{run_id}` to check status and retrieve metrics.
 
 ### Step-by-Step Flow (Pairwise REST API)
@@ -907,7 +907,7 @@ Stores each pairwise comparison result.
 
 File: `app/api/main.py`
 
-The FastAPI application exposes endpoints for runs, pairwise runs, and dataset management, with run state tracked in an in-memory dictionary with database fallback.
+The FastAPI application exposes endpoints for runs, pairwise runs, and dataset management, with run state stored in the database.
 
 ### Endpoints
 
@@ -917,25 +917,22 @@ Trigger a new evaluation run.
 
 - Validates the request body with `RunRequest`.
 - Creates providers through `ProviderFactory`.
-- Generates a pre-assigned run ID and returns it immediately.
+- Creates a queued database run and returns its ID immediately.
 - Spawns the actual evaluation as a background task via `asyncio.create_task`.
-- Updates the in-memory `_run_store` on completion or failure.
+- Updates that same database record on completion or failure.
 
 #### `GET /runs/{run_id}`
 
 Get run status and metrics.
 
-- If the run is in the in-memory store, returns current status.
-- If the run is completed, queries `get_run_metrics()` from the database.
-- If the run is not in the store, checks the database for CLI-initiated runs.
+- Reads status directly from the database and returns metrics only after completion.
 - Returns `404` if the run is not found anywhere.
 
 #### `GET /runs`
 
 List all tracked runs.
 
-- Returns runs from the in-memory store.
-- Also includes runs from the database that were initiated via CLI.
+- Returns every database run, including queued and failed records.
 
 #### `POST /pairwise-runs`
 
@@ -951,11 +948,11 @@ Trigger a new pairwise evaluation run.
 Get pairwise run status and metrics.
 
 - Supports `?include_comparisons=true` query parameter for detailed per-example results.
-- Checks in-memory store first, then database.
+- Reads the pairwise run directly from the database.
 
 #### `GET /pairwise-runs`
 
-List all pairwise runs from both in-memory store and database.
+List all pairwise runs from the database.
 
 #### `GET /datasets`
 
@@ -985,14 +982,9 @@ Set a specific version as the active version.
 
 Delete a dataset and all its versions.
 
-### In-Memory Run Store
+### Database Run Lifecycle
 
-```python
-_run_store: Dict[str, Dict[str, Any]] = {}
-_pairwise_run_store: Dict[str, Dict[str, Any]] = {}
-```
-
-Keys are run IDs. Values retain a lifecycle status (`queued`, `running`, `completed`, `failed`, or `interrupted`), a sanitized optional error, and a simulation flag. The database remains the durable record for completed runs.
+Each API or CLI submission creates a queued database record before any provider call. The returned ID stays unchanged as the record moves through `queued`, `running`, and its terminal status. A sanitized error and simulation flag are stored on the record, so status retrieval and listings survive an application restart.
 
 ### Startup Behavior
 
@@ -1159,7 +1151,7 @@ If the pairwise judge fails:
 - Request validation errors return `400` with descriptive messages.
 - Run-not-found errors return `404`.
 - Dataset-not-found errors return `404`.
-- Background task failures are captured in the in-memory run store.
+- Background task failures update the database run record with a sanitized error.
 - The Gradio UI catches and displays HTTP and connection errors.
 
 ## 17. Metrics Reporting
@@ -1447,7 +1439,6 @@ python app/ui/gradio_app.py
 
 ### Current Limitations
 
-- In-memory run tracking in the API is lost on server restart.
 - No retry/backoff strategy for provider rate limits.
 - No run comparison report beyond simple aggregate metrics.
 - Semantic similarity model may require network/model cache availability on first use.
@@ -1462,7 +1453,6 @@ python app/ui/gradio_app.py
 - Add evaluator selection through CLI flags.
 - Add JSON/CSV export for reports.
 - Add a run comparison command.
-- Persist API run tracking to the database.
 - Add authentication middleware for the REST API.
 - Add WebSocket endpoint for live run progress.
 - Add run cancellation support.
