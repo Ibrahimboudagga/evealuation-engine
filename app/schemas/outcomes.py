@@ -15,3 +15,4 @@ class EvaluationOutcome(str, Enum):
     EVALUATED = "evaluated"
     GENERATION_ERROR = "generation_error"
     EVALUATION_ERROR = "evaluation_error"
+    UNVERIFIED = "unverified"

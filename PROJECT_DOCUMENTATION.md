@@ -996,7 +996,7 @@ Keys are run IDs. Values retain a lifecycle status (`queued`, `running`, `comple
 
 ### Startup Behavior
 
-On FastAPI startup, `init_db()` is called to ensure database tables exist.
+On FastAPI startup, `init_db()` runs Alembic migrations to bring the configured database to the latest schema version. Existing records are preserved; historical results created before explicit outcomes are labelled `unverified`.
 
 ### Error Handling
 
@@ -1449,7 +1449,6 @@ python app/ui/gradio_app.py
 
 - In-memory run tracking in the API is lost on server restart.
 - No retry/backoff strategy for provider rate limits.
-- No migrations system such as Alembic.
 - No run comparison report beyond simple aggregate metrics.
 - Semantic similarity model may require network/model cache availability on first use.
 - LLM-as-a-judge quality depends heavily on the selected judge model.
@@ -1459,7 +1458,6 @@ python app/ui/gradio_app.py
 
 ### Suggested Improvements
 
-- Add Alembic migrations for database schema evolution.
 - Add provider retry logic with exponential backoff.
 - Add evaluator selection through CLI flags.
 - Add JSON/CSV export for reports.
