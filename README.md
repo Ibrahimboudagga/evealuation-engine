@@ -538,6 +538,14 @@ All settings are in `app/config.py` and loaded from environment variables or `.e
 
 Results are stored in `evals.db` by default. Override `DATABASE_URL` in `.env` to use a different file or another SQLAlchemy-supported backend.
 
+Schema migrations run automatically when the API starts. To upgrade a database explicitly, run:
+
+```bash
+alembic upgrade head
+```
+
+When upgrading a database created before run outcomes were introduced, the migration preserves every row and labels historical result and pairwise-comparison outcomes as `unverified`. This avoids treating old zero scores or ties as confirmed evaluations.
+
 ### Tables
 
 | Table | Description |
