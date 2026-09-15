@@ -1,6 +1,6 @@
 import asyncio
 import structlog
-from typing import Dict, Any, Optional
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query
 
@@ -28,8 +28,7 @@ from app.api.schemas import (
     PairwiseComparisonItem,
 )
 from app.database.connection import get_db, init_db
-from app.database.models import DatasetDB
-from app.errors import sanitize_error
+from app.database.models import DatasetDB, EvaluationRunDB, PairwiseRunDB
 from app.evaluators.registry import EvaluatorRegistry
 from app.evaluators.pairwise_judge import PairwiseJudgeEvaluator
 from app.providers.factory import ProviderFactory
@@ -45,12 +44,6 @@ from app.schemas.outcomes import RunStatus
 log = structlog.get_logger()
 
 app = FastAPI(title="LLM Evaluation Engine", version="1.0.0")
-
-# In-memory run tracking: run_id -> {"status": ..., "error": ...}
-_run_store: Dict[str, Dict[str, Any]] = {}
-
-# In-memory pairwise run tracking
-_pairwise_run_store: Dict[str, Dict[str, Any]] = {}
 
 # Service singleton
 _dataset_service = DatasetService()
@@ -152,119 +145,75 @@ async def create_run(req: RunRequest):
         concurrency_limit=req.concurrency,
     )
 
-    # We need to generate a run_id before the task starts so we can return it.
-    # The runner creates its own run_id internally, so we create a placeholder
-    # and let the background task update the store.
-    import uuid
-    pre_run_id = str(uuid.uuid4())
-    _run_store[pre_run_id] = {
-        "status": RunStatus.QUEUED.value,
-        "error": None,
-        "is_simulated": runner._is_simulated(),
-    }
+    run_id = await asyncio.to_thread(runner.create_run, req.dataset_path)
 
     async def _background_run():
         try:
-            _run_store[pre_run_id]["status"] = RunStatus.RUNNING.value
-            actual_run_id = await asyncio.to_thread(
-                lambda: asyncio.run(runner.run_evaluation(req.dataset_path, examples))
+            await asyncio.to_thread(
+                lambda: asyncio.run(
+                    runner.run_evaluation(req.dataset_path, examples, run_id=run_id)
+                )
             )
-            _run_store.pop(pre_run_id, None)
-            _run_store[actual_run_id] = {
-                "status": RunStatus.COMPLETED.value,
-                "error": None,
-                "is_simulated": runner._is_simulated(),
-            }
         except Exception as e:
             log.error("background_run_failed", error=str(e))
-            _run_store[pre_run_id] = {
-                "status": RunStatus.FAILED.value,
-                "error": sanitize_error(e),
-                "is_simulated": runner._is_simulated(),
-            }
+            await asyncio.to_thread(runner._mark_run_failed, run_id, e)
 
     asyncio.create_task(_background_run())
 
-    return RunResponse(run_id=pre_run_id, status=RunStatus.QUEUED, is_simulated=runner._is_simulated())
+    return RunResponse(run_id=run_id, status=RunStatus.QUEUED, is_simulated=runner._is_simulated())
 
 
 @app.get("/runs/{run_id}", response_model=RunStatusResponse)
 async def get_run(run_id: str):
-    info = _run_store.get(run_id)
-
-    if info is None:
-        # Check if it is a completed run in the database (started via CLI or prior to restart)
-        metrics = get_run_metrics(run_id)
-        if not metrics:
+    with get_db() as db:
+        run = db.query(EvaluationRunDB).filter(EvaluationRunDB.id == run_id).first()
+        if not run:
             raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
-        evaluator_metrics = []
-        for name, data in metrics.get("evaluators", {}).items():
-            evaluator_metrics.append(
-                EvaluatorMetric(
-                    evaluator=name,
-                    mean_score=data["avg_score"],
-                    pass_rate=data["pass_rate"],
-                    n=data["count"],
-                )
-            )
-        return RunStatusResponse(run_id=run_id, status=RunStatus.COMPLETED, metrics=evaluator_metrics)
+        status = RunStatus(run.status)
+        created_at = run.created_at
+        started_at = run.started_at
+        completed_at = run.completed_at
+        error_message = run.error_message
+        is_simulated = run.is_simulated
 
-    status = info["status"]
-
-    if status == "completed":
+    evaluator_metrics = None
+    if status == RunStatus.COMPLETED:
         metrics = get_run_metrics(run_id)
-        evaluator_metrics = []
-        if metrics:
-            for name, data in metrics.get("evaluators", {}).items():
-                evaluator_metrics.append(
-                    EvaluatorMetric(
-                        evaluator=name,
-                        mean_score=data["avg_score"],
-                        pass_rate=data["pass_rate"],
-                        n=data["count"],
-                    )
-                )
-        return RunStatusResponse(
-            run_id=run_id,
-            status=status,
-            metrics=evaluator_metrics,
-            is_simulated=info.get("is_simulated", False),
-        )
+        evaluator_metrics = [
+            EvaluatorMetric(
+                evaluator=name,
+                mean_score=data["avg_score"],
+                pass_rate=data["pass_rate"],
+                n=data["count"],
+            )
+            for name, data in metrics.get("evaluators", {}).items()
+        ]
 
     return RunStatusResponse(
         run_id=run_id,
         status=status,
-        error=info.get("error"),
-        is_simulated=info.get("is_simulated", False),
+        metrics=evaluator_metrics,
+        error=error_message,
+        created_at=created_at,
+        started_at=started_at,
+        completed_at=completed_at,
+        is_simulated=is_simulated,
     )
 
 
 @app.get("/runs", response_model=RunsListResponse)
 async def list_runs():
-    runs = [
-        RunListItem(
-            run_id=rid,
-            status=info["status"],
-            is_simulated=info.get("is_simulated", False),
-        )
-        for rid, info in _run_store.items()
-    ]
-
-    # Also include runs from the database that were started via CLI
     with get_db() as db:
-        from app.database.models import EvaluationRunDB
-        db_runs = db.query(EvaluationRunDB).all()
-        known_ids = {r.run_id for r in runs}
-        for db_run in db_runs:
-            if db_run.id not in known_ids:
-                runs.append(
-                    RunListItem(
-                        run_id=db_run.id,
-                        status=db_run.status,
-                        created_at=db_run.created_at,
-                        is_simulated=db_run.is_simulated,
-                    )
-                )
+        db_runs = db.query(EvaluationRunDB).order_by(EvaluationRunDB.created_at.desc()).all()
+        runs = [
+            RunListItem(
+                run_id=db_run.id,
+                status=RunStatus(db_run.status),
+                created_at=db_run.created_at,
+                is_simulated=db_run.is_simulated,
+            )
+            for db_run in db_runs
+        ]
 
     return RunsListResponse(runs=runs)
 
@@ -426,41 +375,23 @@ async def create_pairwise_run(req: PairwiseRunRequest):
         concurrency_limit=req.concurrency,
     )
 
-    import uuid
-    pre_run_id = str(uuid.uuid4())
-    _pairwise_run_store[pre_run_id] = {
-        "status": RunStatus.QUEUED.value,
-        "error": None,
-        "is_simulated": runner._is_simulated(),
-    }
-
-    model_a_name = getattr(provider_a, "model_name", "unknown")
-    model_b_name = getattr(provider_b, "model_name", "unknown")
+    run_id = await asyncio.to_thread(runner.create_run, req.dataset_path)
 
     async def _background_pairwise_run():
         try:
-            _pairwise_run_store[pre_run_id]["status"] = RunStatus.RUNNING.value
-            actual_run_id = await asyncio.to_thread(
-                lambda: asyncio.run(runner.run_pairwise_evaluation(req.dataset_path, examples))
+            await asyncio.to_thread(
+                lambda: asyncio.run(
+                    runner.run_pairwise_evaluation(req.dataset_path, examples, run_id=run_id)
+                )
             )
-            _pairwise_run_store.pop(pre_run_id, None)
-            _pairwise_run_store[actual_run_id] = {
-                "status": RunStatus.COMPLETED.value,
-                "error": None,
-                "is_simulated": runner._is_simulated(),
-            }
         except Exception as e:
             log.error("background_pairwise_run_failed", error=str(e))
-            _pairwise_run_store[pre_run_id] = {
-                "status": RunStatus.FAILED.value,
-                "error": sanitize_error(e),
-                "is_simulated": runner._is_simulated(),
-            }
+            await asyncio.to_thread(runner._mark_run_failed, run_id, e)
 
     asyncio.create_task(_background_pairwise_run())
 
     return PairwiseRunResponse(
-        run_id=pre_run_id,
+        run_id=run_id,
         status=RunStatus.QUEUED,
         is_simulated=runner._is_simulated(),
     )
@@ -468,50 +399,26 @@ async def create_pairwise_run(req: PairwiseRunRequest):
 
 @app.get("/pairwise-runs/{run_id}", response_model=PairwiseRunStatusResponse)
 async def get_pairwise_run(run_id: str, include_comparisons: bool = Query(default=False)):
-    info = _pairwise_run_store.get(run_id)
-
-    if info is None:
-        # Check database for completed runs
-        metrics = get_pairwise_run_metrics(run_id)
-        if not metrics:
+    with get_db() as db:
+        run = db.query(PairwiseRunDB).filter(PairwiseRunDB.id == run_id).first()
+        if not run:
             raise HTTPException(status_code=404, detail=f"Pairwise run '{run_id}' not found")
+        status = RunStatus(run.status)
+        model_a_name = run.model_a_name
+        model_b_name = run.model_b_name
+        created_at = run.created_at
+        started_at = run.started_at
+        completed_at = run.completed_at
+        error_message = run.error_message
+        is_simulated = run.is_simulated
 
-        comparisons = None
-        if include_comparisons:
-            raw = get_pairwise_comparisons(run_id)
-            comparisons = [PairwiseComparisonItem(**c) for c in raw]
-
-        return PairwiseRunStatusResponse(
-            run_id=run_id,
-            model_a_name=metrics["model_a_name"],
-            model_b_name=metrics["model_b_name"],
-            status=RunStatus.COMPLETED,
-            metrics=PairwiseMetrics(
-                total_comparisons=metrics["total_comparisons"],
-                wins_a=metrics["wins_a"],
-                wins_b=metrics["wins_b"],
-                ties=metrics["ties"],
-                win_rate_a=metrics["win_rate_a"],
-                win_rate_b=metrics["win_rate_b"],
-                tie_rate=metrics["tie_rate"],
-                elo_a=metrics["elo_a"],
-                elo_b=metrics["elo_b"],
-                avg_score_a=metrics["avg_score_a"],
-                avg_score_b=metrics["avg_score_b"],
-            ),
-            comparisons=comparisons,
-        )
-
-    status = info["status"]
-
-    if status == "completed":
+    pw_metrics = None
+    comparisons = None
+    if status == RunStatus.COMPLETED:
         metrics = get_pairwise_run_metrics(run_id)
-        comparisons = None
         if include_comparisons:
             raw = get_pairwise_comparisons(run_id)
             comparisons = [PairwiseComparisonItem(**c) for c in raw]
-
-        pw_metrics = None
         if metrics:
             pw_metrics = PairwiseMetrics(
                 total_comparisons=metrics["total_comparisons"],
@@ -527,55 +434,35 @@ async def get_pairwise_run(run_id: str, include_comparisons: bool = Query(defaul
                 avg_score_b=metrics["avg_score_b"],
             )
 
-        return PairwiseRunStatusResponse(
-            run_id=run_id,
-            model_a_name=metrics.get("model_a_name", "unknown") if metrics else "unknown",
-            model_b_name=metrics.get("model_b_name", "unknown") if metrics else "unknown",
-            status=status,
-            metrics=pw_metrics,
-            comparisons=comparisons,
-            is_simulated=info.get("is_simulated", False),
-        )
-
     return PairwiseRunStatusResponse(
         run_id=run_id,
-        model_a_name="unknown",
-        model_b_name="unknown",
+        model_a_name=model_a_name,
+        model_b_name=model_b_name,
         status=status,
-        error=info.get("error"),
-        is_simulated=info.get("is_simulated", False),
+        metrics=pw_metrics,
+        comparisons=comparisons,
+        error=error_message,
+        created_at=created_at,
+        started_at=started_at,
+        completed_at=completed_at,
+        is_simulated=is_simulated,
     )
 
 
 @app.get("/pairwise-runs", response_model=PairwiseRunsListResponse)
 async def list_pairwise_runs():
-    runs = [
-        PairwiseRunListItem(
-            run_id=rid,
-            model_a_name="unknown",
-            model_b_name="unknown",
-            status=info["status"],
-            is_simulated=info.get("is_simulated", False),
-        )
-        for rid, info in _pairwise_run_store.items()
-    ]
-
-    # Also include runs from the database
-    from app.database.models import PairwiseRunDB
     with get_db() as db:
-        db_runs = db.query(PairwiseRunDB).all()
-        known_ids = {r.run_id for r in runs}
-        for db_run in db_runs:
-            if db_run.id not in known_ids:
-                runs.append(
-                    PairwiseRunListItem(
-                        run_id=db_run.id,
-                        model_a_name=db_run.model_a_name,
-                        model_b_name=db_run.model_b_name,
-                        status=db_run.status,
-                        created_at=db_run.created_at,
-                        is_simulated=db_run.is_simulated,
-                    )
-                )
+        db_runs = db.query(PairwiseRunDB).order_by(PairwiseRunDB.created_at.desc()).all()
+        runs = [
+            PairwiseRunListItem(
+                run_id=db_run.id,
+                model_a_name=db_run.model_a_name,
+                model_b_name=db_run.model_b_name,
+                status=RunStatus(db_run.status),
+                created_at=db_run.created_at,
+                is_simulated=db_run.is_simulated,
+            )
+            for db_run in db_runs
+        ]
 
     return PairwiseRunsListResponse(runs=runs)
