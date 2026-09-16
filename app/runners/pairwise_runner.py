@@ -65,11 +65,20 @@ class PairwiseEvaluationRunner:
         provider_b: BaseProvider,
         pairwise_evaluator: BasePairwiseEvaluator,
         concurrency_limit: int = 5,
+        execution_timeout_seconds: float = 60.0,
+        result_batch_size: int = 10,
     ):
         self.provider_a = provider_a
         self.provider_b = provider_b
         self.evaluator = pairwise_evaluator
         self.semaphore = asyncio.Semaphore(concurrency_limit)
+        self.execution_timeout_seconds = execution_timeout_seconds
+        self.result_batch_size = result_batch_size
+
+        if self.execution_timeout_seconds <= 0:
+            raise ValueError("execution_timeout_seconds must be greater than zero.")
+        if self.result_batch_size <= 0:
+            raise ValueError("result_batch_size must be greater than zero.")
 
     def _is_simulated(self) -> bool:
         providers = [self.provider_a, self.provider_b]
@@ -94,6 +103,14 @@ class PairwiseEvaluationRunner:
                 run.completed_at = datetime.now(timezone.utc)
                 run.error_message = "Execution interrupted."
                 db.commit()
+
+    def _persist_comparison_batch(self, run_id: str, comparisons: List[PairwiseComparisonDB]) -> None:
+        """Commit a small completed batch so a restart retains prior work."""
+        if not comparisons:
+            return
+        with get_db() as db:
+            db.add_all(comparisons)
+            db.commit()
 
     def create_run(
         self,
@@ -175,8 +192,17 @@ class PairwiseEvaluationRunner:
             # Generate predictions from both models concurrently
             async def _gen(provider: BaseProvider, label: str) -> tuple[str, Optional[Dict], Optional[str]]:
                 try:
-                    prediction, usage = await provider.generate(example.input)
+                    prediction, usage = await asyncio.wait_for(
+                        provider.generate(example.input),
+                        timeout=self.execution_timeout_seconds,
+                    )
                     return prediction, usage, None
+                except asyncio.TimeoutError:
+                    error_message = (
+                        f"Generation timed out after {self.execution_timeout_seconds:g} seconds."
+                    )
+                    log.error(f"generation_timed_out_{label}", example_id=example.id)
+                    return "", None, error_message
                 except Exception as e:
                     error_message = sanitize_error(e)
                     log.error(f"failed_to_generate_{label}", example_id=example.id, error=error_message)
@@ -225,16 +251,27 @@ class PairwiseEvaluationRunner:
                 original_order = "BA"
 
             # Run pairwise judge
+            judge_error = None
             try:
-                result = await self.evaluator.evaluate(
-                    input_text=example.input,
-                    expected_output=example.expected_output,
-                    response_a=judge_a,
-                    response_b=judge_b,
+                result = await asyncio.wait_for(
+                    self.evaluator.evaluate(
+                        input_text=example.input,
+                        expected_output=example.expected_output,
+                        response_a=judge_a,
+                        response_b=judge_b,
+                    ),
+                    timeout=self.execution_timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                log.error("pairwise_judge_timed_out", example_id=example.id)
+                result = None
+                judge_error = (
+                    f"Evaluation timed out after {self.execution_timeout_seconds:g} seconds."
                 )
             except Exception as e:
                 log.error("pairwise_judge_failed", example_id=example.id, error=str(e))
                 result = None
+                judge_error = sanitize_error(e)
 
             # Un-swap the winner if needed
             if result is not None:
@@ -259,9 +296,9 @@ class PairwiseEvaluationRunner:
                 score_a = None
                 score_b = None
                 judge_reason = "Judge evaluation failed"
-                meta = {"error": "Judge evaluation raised an exception"}
+                meta = {"error": judge_error or "Judge evaluation raised an exception"}
                 outcome = EvaluationOutcome.EVALUATION_ERROR
-                error_message = "Judge evaluation raised an exception"
+                error_message = judge_error or "Judge evaluation raised an exception"
 
             if result is not None:
                 outcome = result.outcome
@@ -407,12 +444,15 @@ class PairwiseEvaluationRunner:
                 db.commit()
 
         try:
-            tasks = [self._run_example(example, run_id) for example in examples]
-            results = await asyncio.gather(*tasks)
+            for start in range(0, len(examples), self.result_batch_size):
+                batch = examples[start:start + self.result_batch_size]
+                results = await asyncio.gather(
+                    *(self._run_example(example, run_id) for example in batch)
+                )
+                db_comparisons = [result for result in results if result is not None]
+                await asyncio.to_thread(self._persist_comparison_batch, run_id, db_comparisons)
 
-            db_comparisons = [r for r in results if r is not None]
             with get_db() as db:
-                db.add_all(db_comparisons)
                 run = db.query(PairwiseRunDB).filter(PairwiseRunDB.id == run_id).first()
                 if run:
                     run.status = RunStatus.COMPLETED.value
