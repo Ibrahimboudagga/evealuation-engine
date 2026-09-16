@@ -1,23 +1,28 @@
 import structlog
 import json
 from typing import Optional, Dict, Any, Tuple
-from app.providers.base import BaseProvider
+from app.providers.base import BaseProvider, ProviderConfigurationError
 from app.config import get_settings
 
 log = structlog.get_logger()
 
 
 class CohereProvider(BaseProvider):
-    def __init__(self, model_name: str = "command-r-plus", api_key: str = None, base_url: str = None):
+    def __init__(self, model_name: str = "command-r-plus", api_key: str = None, base_url: str = None, demo_mode: bool = False):
         self.model_name = model_name
         self.api_key = api_key or get_settings().cohere_api_key
         self.base_url = base_url
-        self.is_mock = not self.api_key or self.api_key == "mock" or self.model_name == "mock"
+        self.is_mock = demo_mode or self.api_key == "mock" or self.model_name == "mock"
 
         if self.is_mock:
             log.warning("using_mock_mode", provider="CohereProvider", model=self.model_name)
             self.client = None
         else:
+            if not self.api_key:
+                raise ProviderConfigurationError(
+                    "Cohere requires an API key. Set COHERE_API_KEY or pass api_key; "
+                    "select mock explicitly for demo mode."
+                )
             from cohere import AsyncClient
             kwargs: Dict[str, Any] = {"api_key": self.api_key}
             if self.base_url:

@@ -17,7 +17,7 @@ The project supports both real LLM providers and mock provider execution, making
 - Store datasets, evaluation runs, pairwise runs, and individual results in SQLite.
 - Expose the evaluation pipeline through a REST API (FastAPI).
 - Provide an interactive web UI (Gradio) for non-technical users.
-- Support mock mode for development and testing without API keys.
+- Support explicitly selected mock mode for development and testing without API keys.
 - Provide a modular architecture for adding new providers and evaluators.
 
 ## 2. Technology Stack
@@ -317,9 +317,9 @@ concurrency = get_setting("DEFAULT_CONCURRENCY")
 | `GEMINI_API_KEY` | Gemini API key | empty |
 | `GOOGLE_API_KEY` | Alternate Gemini key | empty |
 | `COHERE_API_KEY` | Cohere API key | empty |
-| `DEFAULT_CANDIDATE_PROVIDER` | Default model provider | `openai` |
+| `DEFAULT_CANDIDATE_PROVIDER` | Default model provider | `mock` |
 | `DEFAULT_CANDIDATE_MODEL` | Default candidate model | `mock` |
-| `DEFAULT_EVALUATOR_PROVIDER` | Default judge provider | `openai` |
+| `DEFAULT_EVALUATOR_PROVIDER` | Default judge provider | `mock` |
 | `DEFAULT_EVALUATOR_MODEL` | Default judge model | `mock` |
 | `DEFAULT_CONCURRENCY` | Parallel evaluation limit | `3` |
 | `SIMILARITY_MODEL_NAME` | SentenceTransformer model | `all-MiniLM-L6-v2` |
@@ -1225,7 +1225,7 @@ log.warning("using_mock_mode", provider="CohereProvider", model="command-r-plus"
 | `app/runners/eval_runner.py` | `running_evaluation`, `failed_to_generate_prediction`, `evaluator_failed` |
 | `app/runners/pairwise_runner.py` | `running_pairwise_comparison`, `failed_to_generate_model_a`, `failed_to_generate_model_b`, `pairwise_judge_failed` |
 | `app/services/dataset_service.py` | `dataset_created`, `dataset_version_added`, `dataset_active_version_set`, `dataset_deleted` |
-| `app/providers/factory.py` | `unknown_provider_defaulting_to_openai` |
+| `app/providers/factory.py` | configuration errors are raised for unknown providers and missing credentials |
 | `app/providers/openai.py` | `using_mock_mode`, `openai_generate_failed` |
 | `app/providers/anthropic.py` | `using_mock_mode`, `anthropic_generate_failed` |
 | `app/providers/gemini.py` | `using_mock_mode`, `gemini_generate_failed` |

@@ -121,6 +121,7 @@ async def create_run(req: RunRequest):
             model_id=req.candidate_model,
             api_key=req.candidate_api_key,
             base_url=req.candidate_base_url,
+            allow_unauthenticated=req.candidate_allow_unauthenticated,
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to create candidate provider: {e}")
@@ -339,6 +340,7 @@ async def create_pairwise_run(req: PairwiseRunRequest):
             model_id=req.model_a_model,
             api_key=req.model_a_api_key,
             base_url=req.model_a_base_url,
+            allow_unauthenticated=req.model_a_allow_unauthenticated,
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to create model A provider: {e}")
@@ -350,6 +352,7 @@ async def create_pairwise_run(req: PairwiseRunRequest):
             model_id=req.model_b_model,
             api_key=req.model_b_api_key,
             base_url=req.model_b_base_url,
+            allow_unauthenticated=req.model_b_allow_unauthenticated,
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to create model B provider: {e}")

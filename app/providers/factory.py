@@ -1,6 +1,6 @@
 import structlog
 from typing import Optional
-from app.providers.base import BaseProvider
+from app.providers.base import BaseProvider, ProviderConfigurationError
 from app.providers.openai import OpenAIProvider
 from app.providers.anthropic import AnthropicProvider
 from app.providers.gemini import GeminiProvider
@@ -19,7 +19,8 @@ class ProviderFactory:
         provider: str,
         model_id: Optional[str] = None,
         api_key: Optional[str] = None,
-        base_url: Optional[str] = None
+        base_url: Optional[str] = None,
+        allow_unauthenticated: bool = False,
     ) -> BaseProvider:
         """
         Creates and returns a provider instance.
@@ -44,10 +45,36 @@ class ProviderFactory:
             else:
                 model_id = provider_clean
                 
-        # Handle explicitly requested mock keys or mock models
-        is_force_mock = api_key == "mock" or model_id == "mock"
-        if is_force_mock:
-            api_key = "mock"
+        supported_providers = {
+            "openai", "anthropic", "gemini", "google", "cohere", "co",
+            "groq", "huggingface", "hf", "openai-compatible", "compatible",
+            "mock", "dummy", "demo",
+        }
+        if provider_clean not in supported_providers:
+            raise ProviderConfigurationError(
+                f"Unknown provider '{provider}'. Choose a supported provider or explicit 'mock' demo mode."
+            )
+
+        # Demo behavior is only enabled by an explicit mock selection.
+        is_demo = provider_clean in {"mock", "dummy", "demo"} or model_id == "mock" or api_key == "mock"
+        if is_demo:
+            demo_base_url = base_url
+            if provider_clean == "groq" and not demo_base_url:
+                demo_base_url = "https://api.groq.com/openai/v1"
+            if provider_clean == "anthropic":
+                return AnthropicProvider(model_name=model_id or "mock", api_key="mock", demo_mode=True)
+            if provider_clean in {"gemini", "google"}:
+                return GeminiProvider(model_name=model_id or "mock", api_key="mock", demo_mode=True)
+            if provider_clean in {"cohere", "co"}:
+                return CohereProvider(
+                    model_name=model_id or "mock", api_key="mock", base_url=demo_base_url, demo_mode=True
+                )
+            return OpenAIProvider(
+                model_name=model_id or "mock",
+                api_key="mock",
+                base_url=demo_base_url,
+                demo_mode=True,
+            )
 
         if provider_clean == "openai":
             return OpenAIProvider(model_name=model_id, api_key=api_key, base_url=base_url)
@@ -71,15 +98,20 @@ class ProviderFactory:
             actual_base_url = base_url
             if provider_clean == "groq" and not actual_base_url:
                 actual_base_url = "https://api.groq.com/openai/v1"
-            return OpenAIProvider(model_name=model_id, api_key=api_key, base_url=actual_base_url)
-            
-        elif provider_clean == "mock" or provider_clean == "dummy":
-            return OpenAIProvider(model_name="mock-model", api_key="mock")
-            
-        else:
-            log.warning(
-                "unknown_provider_defaulting_to_openai",
-                provider=provider,
-                model_id=model_id,
+            supports_unauthenticated = provider_clean in {"openai-compatible", "compatible"}
+            if allow_unauthenticated and not supports_unauthenticated:
+                raise ProviderConfigurationError(
+                    "Unauthenticated access is only supported for the explicit "
+                    "'compatible' or 'openai-compatible' provider selection."
+                )
+            if allow_unauthenticated and not actual_base_url:
+                raise ProviderConfigurationError(
+                    "An unauthenticated compatible endpoint requires base_url."
+                )
+            return OpenAIProvider(
+                model_name=model_id,
+                api_key=api_key,
+                base_url=actual_base_url,
+                allow_unauthenticated=allow_unauthenticated,
+                use_default_api_key=not allow_unauthenticated,
             )
-            return OpenAIProvider(model_name=model_id, api_key=api_key, base_url=base_url)

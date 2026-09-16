@@ -31,9 +31,9 @@ class Settings(BaseSettings):
     cohere_api_key: Optional[str] = None
 
     # Evaluation engine defaults
-    default_candidate_provider: str = "openai"
+    default_candidate_provider: str = "mock"
     default_candidate_model: str = "mock"
-    default_evaluator_provider: str = "openai"
+    default_evaluator_provider: str = "mock"
     default_evaluator_model: str = "mock"
     default_concurrency: int = 3
 

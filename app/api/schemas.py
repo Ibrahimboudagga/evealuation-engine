@@ -14,6 +14,10 @@ class RunRequest(BaseModel):
     candidate_model: str = Field(..., description="Candidate model ID / identifier")
     candidate_api_key: Optional[str] = Field(default=None, description="Authentication key for the candidate provider")
     candidate_base_url: Optional[str] = Field(default=None, description="Custom API base URL for the candidate provider")
+    candidate_allow_unauthenticated: bool = Field(
+        default=False,
+        description="Allow a keyless request only for an explicit compatible endpoint with a base URL",
+    )
     evaluator_provider: str = Field(..., description="Evaluator/judge provider name")
     evaluator_model: str = Field(..., description="Evaluator/judge model ID / identifier")
     evaluator_api_key: Optional[str] = Field(default=None, description="Authentication key for the evaluator model")
@@ -135,10 +139,12 @@ class PairwiseRunRequest(BaseModel):
     model_a_model: str = Field(..., description="Model A model ID")
     model_a_api_key: Optional[str] = Field(default=None, description="Model A API key")
     model_a_base_url: Optional[str] = Field(default=None, description="Model A custom base URL")
+    model_a_allow_unauthenticated: bool = Field(default=False, description="Allow a keyless compatible endpoint for model A")
     model_b_provider: str = Field(..., description="Model B provider name")
     model_b_model: str = Field(..., description="Model B model ID")
     model_b_api_key: Optional[str] = Field(default=None, description="Model B API key")
     model_b_base_url: Optional[str] = Field(default=None, description="Model B custom base URL")
+    model_b_allow_unauthenticated: bool = Field(default=False, description="Allow a keyless compatible endpoint for model B")
     judge_provider: str = Field(..., description="Judge provider name")
     judge_model: str = Field(..., description="Judge model ID")
     judge_api_key: Optional[str] = Field(default=None, description="Judge API key")
