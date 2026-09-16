@@ -63,11 +63,20 @@ class EvaluationRunner:
         self, 
         provider: BaseProvider, 
         registry: EvaluatorRegistry, 
-        concurrency_limit: int = 5
+        concurrency_limit: int = 5,
+        execution_timeout_seconds: float = 60.0,
+        result_batch_size: int = 10,
     ):
         self.provider = provider
         self.registry = registry
         self.semaphore = asyncio.Semaphore(concurrency_limit)
+        self.execution_timeout_seconds = execution_timeout_seconds
+        self.result_batch_size = result_batch_size
+
+        if self.execution_timeout_seconds <= 0:
+            raise ValueError("execution_timeout_seconds must be greater than zero.")
+        if self.result_batch_size <= 0:
+            raise ValueError("result_batch_size must be greater than zero.")
 
     def _is_simulated(self) -> bool:
         providers = [self.provider]
@@ -95,6 +104,14 @@ class EvaluationRunner:
                 run.completed_at = datetime.now(timezone.utc)
                 run.error_message = "Execution interrupted."
                 db.commit()
+
+    def _persist_result_batch(self, run_id: str, results: List[EvaluationResultDB]) -> None:
+        """Commit a small completed batch so a restart retains prior work."""
+        if not results:
+            return
+        with get_db() as db:
+            db.add_all(results)
+            db.commit()
 
     def create_run(
         self,
@@ -175,7 +192,15 @@ class EvaluationRunner:
             provider_usage = None
             generation_error = None
             try:
-                prediction, provider_usage = await self.provider.generate(example.input)
+                prediction, provider_usage = await asyncio.wait_for(
+                    self.provider.generate(example.input),
+                    timeout=self.execution_timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                generation_error = (
+                    f"Generation timed out after {self.execution_timeout_seconds:g} seconds."
+                )
+                log.error("prediction_generation_timed_out", example_id=example.id)
             except Exception as e:
                 generation_error = sanitize_error(e)
                 log.error("failed_to_generate_prediction", example_id=example.id, error=generation_error)
@@ -205,10 +230,13 @@ class EvaluationRunner:
             
             for evaluator in evaluators:
                 eval_tasks.append(
-                    evaluator.evaluate(
-                        input_text=example.input,
-                        expected_output=example.expected_output,
-                        prediction=prediction
+                    asyncio.wait_for(
+                        evaluator.evaluate(
+                            input_text=example.input,
+                            expected_output=example.expected_output,
+                            prediction=prediction,
+                        ),
+                        timeout=self.execution_timeout_seconds,
                     )
                 )
                 
@@ -219,7 +247,11 @@ class EvaluationRunner:
             for evaluator, res in zip(evaluators, eval_results):
                 if isinstance(res, Exception):
                     log.error("evaluator_failed", evaluator=evaluator.name, example_id=example.id, error=str(res))
-                    error_message = sanitize_error(res)
+                    error_message = (
+                        f"Evaluation timed out after {self.execution_timeout_seconds:g} seconds."
+                        if isinstance(res, asyncio.TimeoutError)
+                        else sanitize_error(res)
+                    )
                     db_res = EvaluationResultDB(
                         run_id=run_id,
                         example_id=example.id,
@@ -387,12 +419,15 @@ class EvaluationRunner:
                 db.commit()
             
         try:
-            tasks = [self._run_example(example, run_id) for example in examples]
-            results_nested = await asyncio.gather(*tasks)
-            all_results = [res for sublist in results_nested for res in sublist]
+            for start in range(0, len(examples), self.result_batch_size):
+                batch = examples[start:start + self.result_batch_size]
+                results_nested = await asyncio.gather(
+                    *(self._run_example(example, run_id) for example in batch)
+                )
+                all_results = [result for results in results_nested for result in results]
+                await asyncio.to_thread(self._persist_result_batch, run_id, all_results)
 
             with get_db() as db:
-                db.add_all(all_results)
                 run = db.query(EvaluationRunDB).filter(EvaluationRunDB.id == run_id).first()
                 if run:
                     run.status = RunStatus.COMPLETED.value

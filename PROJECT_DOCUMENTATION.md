@@ -229,7 +229,8 @@ flowchart TD
 5. A pre-assigned run ID is returned immediately to the caller.
 6. The actual evaluation runs as a background task via `asyncio.create_task`.
 7. The same database record moves through `queued`, `running`, and its terminal status.
-8. The user polls `GET /runs/{run_id}` to check status and retrieve metrics.
+8. Results are committed in small batches, so completed examples remain available if execution stops.
+9. The user polls `GET /runs/{run_id}` to check status and retrieve metrics.
 
 ### Step-by-Step Flow (Pairwise REST API)
 
@@ -241,8 +242,9 @@ flowchart TD
 6. A pre-assigned run ID is returned immediately.
 7. The pairwise evaluation runs as a background task.
 8. For each example, both models generate responses concurrently, the order is randomized, the judge compares them, and the winner is un-swapped if needed.
-9. After all examples, win/loss/tie rates and Elo ratings are computed.
-10. The user polls `GET /pairwise-runs/{run_id}` to check status and retrieve metrics.
+9. Completed comparisons are committed in small batches, so earlier comparisons remain available if execution stops.
+10. After all examples, win/loss/tie rates and Elo ratings are computed.
+11. The user polls `GET /pairwise-runs/{run_id}` to check status and retrieve metrics.
 
 ### Step-by-Step Flow (Gradio UI)
 
@@ -985,6 +987,8 @@ Delete a dataset and all its versions.
 ### Database Run Lifecycle
 
 Each API or CLI submission creates a queued database record before any provider call. The returned ID stays unchanged as the record moves through `queued`, `running`, and its terminal status. A sanitized error and simulation flag are stored on the record, so status retrieval and listings survive an application restart.
+
+The API has one process-local execution worker. It runs submitted evaluations serially and commits completed results in batches of ten. Provider generation and judge calls use a 60-second timeout, which becomes a visible generation or evaluation error rather than an indefinitely running request. On startup, the application marks queued or running records left by a stopped worker as `interrupted`. This recovery policy is intentionally limited to the single-worker deployment; a multi-worker deployment needs worker ownership and heartbeats before it can reconcile abandoned records safely.
 
 ### Startup Behavior
 

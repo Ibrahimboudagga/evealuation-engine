@@ -476,8 +476,10 @@ Inputs:
 ### Tab 2 -- View Results
 
 Enter a Run ID and click **Fetch Results**. The UI queries the API and displays:
-- Run status as text
-- Metrics as a table with columns: Evaluator, Mean Score, Pass Rate, N
+- Lifecycle status, including `queued`, `running`, `completed`, `failed`, and `interrupted`
+- A visible `SIMULATED` label when any response came from a demo provider
+- Any sanitized run error
+- Metrics with valid-result counts, coverage, generation errors, and evaluation errors
 
 ### Tab 3 -- Pairwise Evaluation
 
@@ -493,9 +495,19 @@ Inputs:
 ### Tab 4 -- Pairwise Results
 
 Enter a Pairwise Run ID and click **Fetch Results**. Displays:
-- Run status with model names
-- Metrics table: Win Rate A/B, Tie Rate, Elo A/B, Avg Score A/B, Total Comparisons
+- Run status with model names, simulation label, and any sanitized error
+- Metrics table with valid comparisons, coverage, generation/evaluation errors, Win Rate A/B, Tie Rate, Elo A/B, and Avg Score A/B
 - Per-example comparisons table: Example ID, Winner, Score A, Score B, Reason
+
+---
+
+## Execution and Restart Recovery
+
+The Week 1 service runs one evaluation worker per application process. Submitted runs remain `queued` until that worker begins them, then move to `running`. Completed results are committed in batches of ten, so an interruption retains earlier batches.
+
+Provider generation and judge calls have a 60-second timeout. A timed-out generation is saved as a `generation_error`; a timed-out judge is saved as an `evaluation_error`.
+
+On application startup, records left `queued` or `running` by the stopped worker are marked `interrupted` with a restart message. This recovery behavior is designed for the current single-worker deployment. A multi-worker deployment must add worker ownership and heartbeats before enabling it.
 
 ---
 

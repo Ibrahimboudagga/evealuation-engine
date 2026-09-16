@@ -39,11 +39,13 @@ from app.runners.pairwise_runner import (
     get_pairwise_comparisons,
 )
 from app.services.dataset_service import DatasetService
+from app.services.run_recovery import reconcile_abandoned_runs
 from app.schemas.outcomes import RunStatus
 
 log = structlog.get_logger()
 
 app = FastAPI(title="LLM Evaluation Engine", version="1.0.0")
+_single_execution_worker = asyncio.Lock()
 
 # Service singleton
 _dataset_service = DatasetService()
@@ -103,6 +105,9 @@ def _dataset_to_detail(dataset: DatasetDB) -> DatasetDetailResponse:
 @app.on_event("startup")
 def startup():
     init_db()
+    recovered = reconcile_abandoned_runs()
+    if recovered["evaluation_runs"] or recovered["pairwise_runs"]:
+        log.info("abandoned_runs_reconciled", **recovered)
 
 
 # ── Existing Run Endpoints ───────────────────────────────────
@@ -150,11 +155,12 @@ async def create_run(req: RunRequest):
 
     async def _background_run():
         try:
-            await asyncio.to_thread(
-                lambda: asyncio.run(
-                    runner.run_evaluation(req.dataset_path, examples, run_id=run_id)
+            async with _single_execution_worker:
+                await asyncio.to_thread(
+                    lambda: asyncio.run(
+                        runner.run_evaluation(req.dataset_path, examples, run_id=run_id)
+                    )
                 )
-            )
         except Exception as e:
             log.error("background_run_failed", error=str(e))
             await asyncio.to_thread(runner._mark_run_failed, run_id, e)
@@ -178,7 +184,7 @@ async def get_run(run_id: str):
         is_simulated = run.is_simulated
 
     evaluator_metrics = None
-    if status == RunStatus.COMPLETED:
+    if status in {RunStatus.RUNNING, RunStatus.COMPLETED, RunStatus.INTERRUPTED}:
         metrics = get_run_metrics(run_id)
         evaluator_metrics = [
             EvaluatorMetric(
@@ -388,11 +394,12 @@ async def create_pairwise_run(req: PairwiseRunRequest):
 
     async def _background_pairwise_run():
         try:
-            await asyncio.to_thread(
-                lambda: asyncio.run(
-                    runner.run_pairwise_evaluation(req.dataset_path, examples, run_id=run_id)
+            async with _single_execution_worker:
+                await asyncio.to_thread(
+                    lambda: asyncio.run(
+                        runner.run_pairwise_evaluation(req.dataset_path, examples, run_id=run_id)
+                    )
                 )
-            )
         except Exception as e:
             log.error("background_pairwise_run_failed", error=str(e))
             await asyncio.to_thread(runner._mark_run_failed, run_id, e)
@@ -423,7 +430,7 @@ async def get_pairwise_run(run_id: str, include_comparisons: bool = Query(defaul
 
     pw_metrics = None
     comparisons = None
-    if status == RunStatus.COMPLETED:
+    if status in {RunStatus.RUNNING, RunStatus.COMPLETED, RunStatus.INTERRUPTED}:
         metrics = get_pairwise_run_metrics(run_id)
         if include_comparisons:
             raw = get_pairwise_comparisons(run_id)
