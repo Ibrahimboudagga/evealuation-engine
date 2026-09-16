@@ -20,6 +20,11 @@ from app.evaluators.base_pairwise import BasePairwiseEvaluator
 from app.providers.base import BaseProvider
 from app.schemas.example import EvaluationExample
 from app.schemas.outcomes import EvaluationOutcome, RunStatus
+from app.services.run_configuration import (
+    build_pairwise_run_configuration,
+    dataset_path_snapshot,
+    dataset_version_snapshot,
+)
 
 log = structlog.get_logger()
 
@@ -67,13 +72,16 @@ class PairwiseEvaluationRunner:
         concurrency_limit: int = 5,
         execution_timeout_seconds: float = 60.0,
         result_batch_size: int = 10,
+        requested_configuration: Optional[Dict[str, Any]] = None,
     ):
         self.provider_a = provider_a
         self.provider_b = provider_b
         self.evaluator = pairwise_evaluator
         self.semaphore = asyncio.Semaphore(concurrency_limit)
+        self.concurrency_limit = concurrency_limit
         self.execution_timeout_seconds = execution_timeout_seconds
         self.result_batch_size = result_batch_size
+        self.requested_configuration = requested_configuration
 
         if self.execution_timeout_seconds <= 0:
             raise ValueError("execution_timeout_seconds must be greater than zero.")
@@ -152,6 +160,18 @@ class PairwiseEvaluationRunner:
                     model_b_name=getattr(self.provider_b, "model_name", "unknown-model-b"),
                     status=RunStatus.QUEUED.value,
                     is_simulated=self._is_simulated(),
+                    configuration_verified=True,
+                )
+                db_run.run_configuration = build_pairwise_run_configuration(
+                    dataset=dataset_version_snapshot(db_dataset, db_version),
+                    provider_a=self.provider_a,
+                    provider_b=self.provider_b,
+                    evaluator=self.evaluator,
+                    concurrency_limit=self.concurrency_limit,
+                    execution_timeout_seconds=self.execution_timeout_seconds,
+                    result_batch_size=self.result_batch_size,
+                    is_simulated=self._is_simulated(),
+                    requested_configuration=self.requested_configuration,
                 )
             else:
                 if dataset_path is None:
@@ -173,6 +193,18 @@ class PairwiseEvaluationRunner:
                     model_b_name=getattr(self.provider_b, "model_name", "unknown-model-b"),
                     status=RunStatus.QUEUED.value,
                     is_simulated=self._is_simulated(),
+                    configuration_verified=True,
+                )
+                db_run.run_configuration = build_pairwise_run_configuration(
+                    dataset=dataset_path_snapshot(dataset_path),
+                    provider_a=self.provider_a,
+                    provider_b=self.provider_b,
+                    evaluator=self.evaluator,
+                    concurrency_limit=self.concurrency_limit,
+                    execution_timeout_seconds=self.execution_timeout_seconds,
+                    result_batch_size=self.result_batch_size,
+                    is_simulated=self._is_simulated(),
+                    requested_configuration=self.requested_configuration,
                 )
 
             db.add(db_run)

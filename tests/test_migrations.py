@@ -107,6 +107,9 @@ def test_migration_creates_a_fresh_database(tmp_path):
     inspector = inspect(create_engine(f"sqlite:///{database_path}"))
     assert {"datasets", "dataset_versions", "evaluation_runs", "evaluation_results", "pairwise_runs", "pairwise_comparisons"} <= set(inspector.get_table_names())
     assert {column["name"] for column in inspector.get_columns("evaluation_results")} >= {"outcome", "error_message"}
+    assert {column["name"] for column in inspector.get_columns("evaluation_runs")} >= {
+        "run_configuration_json", "configuration_verified"
+    }
     assert next(column for column in inspector.get_columns("evaluation_results") if column["name"] == "score")["nullable"]
 
 
@@ -126,13 +129,14 @@ def test_migration_preserves_copied_legacy_records_and_marks_them_unverified(tmp
         "SELECT winner, score_a, score_b, outcome, error_message FROM pairwise_comparisons WHERE example_id = 'example-tie'"
     ).fetchone()
     run = connection.execute(
-        "SELECT status, is_simulated, started_at, completed_at FROM evaluation_runs WHERE id = 'run-1'"
+        """SELECT status, is_simulated, started_at, completed_at,
+        run_configuration_json, configuration_verified FROM evaluation_runs WHERE id = 'run-1'"""
     ).fetchone()
     connection.close()
 
     assert result == ("wrong", 0.0, "unverified", None)
     assert comparison == ("tie", 0.0, 0.0, "unverified", None)
-    assert run == ("completed", 0, None, None)
+    assert run == ("completed", 0, None, None, None, 0)
 
     inspector = inspect(create_engine(f"sqlite:///{upgraded_copy}"))
     result_score = next(column for column in inspector.get_columns("evaluation_results") if column["name"] == "score")

@@ -41,7 +41,7 @@ async def submit_run(
 
 async def get_run_status(run_id):
     if not run_id or not run_id.strip():
-        return "Please enter a Run ID.", None
+        return "Please enter a Run ID.", None, None
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(f"{API_BASE}/runs/{run_id.strip()}")
@@ -54,8 +54,12 @@ async def get_run_status(run_id):
             error = data.get("error")
             if error:
                 status = f"{status} — {error}"
+            configuration = {
+                "configuration_verified": data.get("configuration_verified", False),
+                "configuration": data.get("run_configuration"),
+            }
             if not metrics:
-                return status, None
+                return status, None, configuration
             rows = []
             for m in metrics:
                 has_valid_evaluations = m["mean_score"] is not None
@@ -69,11 +73,11 @@ async def get_run_status(run_id):
                     m["evaluation_errors"],
                     m["passing_evaluations"],
                 ])
-            return status, rows
+            return status, rows, configuration
     except httpx.HTTPStatusError as e:
-        return f"HTTP {e.response.status_code}: {e.response.text}", None
+        return f"HTTP {e.response.status_code}: {e.response.text}", None, None
     except Exception as e:
-        return f"Error: {e}", None
+        return f"Error: {e}", None, None
 
 
 async def submit_pairwise_run(
@@ -119,7 +123,7 @@ async def submit_pairwise_run(
 
 async def get_pairwise_status(run_id):
     if not run_id or not run_id.strip():
-        return "Please enter a Run ID.", None, None
+        return "Please enter a Run ID.", None, None, None
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(
@@ -138,8 +142,12 @@ async def get_pairwise_status(run_id):
                 status = f"{status} — {error}"
             metrics = data.get("metrics")
             comparisons = data.get("comparisons")
+            configuration = {
+                "configuration_verified": data.get("configuration_verified", False),
+                "configuration": data.get("run_configuration"),
+            }
             if not metrics:
-                return f"{status} ({model_a} vs {model_b})", None, None
+                return f"{status} ({model_a} vs {model_b})", None, None, configuration
 
             m = metrics
             metrics_rows = [
@@ -171,11 +179,11 @@ async def get_pairwise_status(run_id):
                     for c in comparisons
                 ]
 
-            return f"{status} ({model_a} vs {model_b})", metrics_rows, comp_rows
+            return f"{status} ({model_a} vs {model_b})", metrics_rows, comp_rows, configuration
     except httpx.HTTPStatusError as e:
-        return f"HTTP {e.response.status_code}: {e.response.text}", None, None
+        return f"HTTP {e.response.status_code}: {e.response.text}", None, None, None
     except Exception as e:
-        return f"Error: {e}", None, None
+        return f"Error: {e}", None, None, None
 
 
 with gr.Blocks(title="LLM Evaluation Engine") as demo:
@@ -231,11 +239,12 @@ with gr.Blocks(title="LLM Evaluation Engine") as demo:
             ],
             label="Metrics",
         )
+        configuration_output = gr.JSON(label="Execution Configuration")
 
         fetch_btn.click(
             fn=get_run_status,
             inputs=[run_id_input],
-            outputs=[status_output, metrics_output],
+            outputs=[status_output, metrics_output, configuration_output],
         )
 
     # ── Pairwise Evaluation Tab ──────────────────────────────
@@ -298,11 +307,12 @@ with gr.Blocks(title="LLM Evaluation Engine") as demo:
             headers=["Example ID", "Winner", "Score A", "Score B", "Reason"],
             label="Individual Comparisons",
         )
+        pw_configuration_output = gr.JSON(label="Execution Configuration")
 
         pw_fetch_btn.click(
             fn=get_pairwise_status,
             inputs=[pw_run_id_input],
-            outputs=[pw_status_output, pw_metrics_output, pw_comparisons_output],
+            outputs=[pw_status_output, pw_metrics_output, pw_comparisons_output, pw_configuration_output],
         )
 
 

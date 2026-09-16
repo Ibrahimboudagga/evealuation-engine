@@ -149,6 +149,19 @@ async def create_run(req: RunRequest):
         provider=candidate_provider,
         registry=registry,
         concurrency_limit=req.concurrency,
+        requested_configuration={
+            "candidate": {
+                "provider": req.candidate_provider,
+                "model": req.candidate_model,
+                "base_url": req.candidate_base_url,
+                "allow_unauthenticated": req.candidate_allow_unauthenticated,
+            },
+            "judge": {
+                "provider": req.evaluator_provider,
+                "model": req.evaluator_model,
+            },
+            "judge_prompt_template": req.judge_prompt_template,
+        },
     )
 
     run_id = await asyncio.to_thread(runner.create_run, req.dataset_path)
@@ -182,6 +195,8 @@ async def get_run(run_id: str):
         completed_at = run.completed_at
         error_message = run.error_message
         is_simulated = run.is_simulated
+        run_configuration = run.run_configuration
+        configuration_verified = run.configuration_verified
 
     evaluator_metrics = None
     if status in {RunStatus.RUNNING, RunStatus.COMPLETED, RunStatus.INTERRUPTED}:
@@ -211,6 +226,8 @@ async def get_run(run_id: str):
         started_at=started_at,
         completed_at=completed_at,
         is_simulated=is_simulated,
+        run_configuration=run_configuration,
+        configuration_verified=configuration_verified,
     )
 
 
@@ -388,6 +405,25 @@ async def create_pairwise_run(req: PairwiseRunRequest):
         provider_b=provider_b,
         pairwise_evaluator=evaluator,
         concurrency_limit=req.concurrency,
+        requested_configuration={
+            "model_a": {
+                "provider": req.model_a_provider,
+                "model": req.model_a_model,
+                "base_url": req.model_a_base_url,
+                "allow_unauthenticated": req.model_a_allow_unauthenticated,
+            },
+            "model_b": {
+                "provider": req.model_b_provider,
+                "model": req.model_b_model,
+                "base_url": req.model_b_base_url,
+                "allow_unauthenticated": req.model_b_allow_unauthenticated,
+            },
+            "judge": {
+                "provider": req.judge_provider,
+                "model": req.judge_model,
+            },
+            "judge_prompt_template": req.judge_prompt_template,
+        },
     )
 
     run_id = await asyncio.to_thread(runner.create_run, req.dataset_path)
@@ -427,6 +463,8 @@ async def get_pairwise_run(run_id: str, include_comparisons: bool = Query(defaul
         completed_at = run.completed_at
         error_message = run.error_message
         is_simulated = run.is_simulated
+        run_configuration = run.run_configuration
+        configuration_verified = run.configuration_verified
 
     pw_metrics = None
     comparisons = None
@@ -467,6 +505,8 @@ async def get_pairwise_run(run_id: str, include_comparisons: bool = Query(defaul
         started_at=started_at,
         completed_at=completed_at,
         is_simulated=is_simulated,
+        run_configuration=run_configuration,
+        configuration_verified=configuration_verified,
     )
 
 

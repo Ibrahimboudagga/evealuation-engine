@@ -511,6 +511,14 @@ On application startup, records left `queued` or `running` by the stopped worker
 
 ---
 
+## Reproducible Run Configuration
+
+Every new run stores a credential-safe configuration snapshot before execution. It records the dataset registry version or legacy-file SHA-256 fingerprint, actual candidate and judge models, evaluator and prompt settings, execution concurrency, timeout, batch size, and simulation state. `GET /runs/{run_id}` and `GET /pairwise-runs/{run_id}` return this snapshot as `run_configuration`; the Gradio result pages show it under **Execution Configuration**.
+
+Snapshots never retain API keys. Historical records created before this feature return `configuration_verified: false`; new records return `true`.
+
+---
+
 ## Providers
 
 | Provider | File | Default Model | Factory Identifiers |

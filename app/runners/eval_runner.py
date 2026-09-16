@@ -15,6 +15,11 @@ from app.evaluators.registry import EvaluatorRegistry
 from app.providers.base import BaseProvider
 from app.schemas.example import EvaluationExample
 from app.schemas.outcomes import EvaluationOutcome, RunStatus
+from app.services.run_configuration import (
+    build_single_run_configuration,
+    dataset_path_snapshot,
+    dataset_version_snapshot,
+)
 
 log = structlog.get_logger()
 
@@ -66,12 +71,15 @@ class EvaluationRunner:
         concurrency_limit: int = 5,
         execution_timeout_seconds: float = 60.0,
         result_batch_size: int = 10,
+        requested_configuration: Optional[Dict[str, Any]] = None,
     ):
         self.provider = provider
         self.registry = registry
         self.semaphore = asyncio.Semaphore(concurrency_limit)
+        self.concurrency_limit = concurrency_limit
         self.execution_timeout_seconds = execution_timeout_seconds
         self.result_batch_size = result_batch_size
+        self.requested_configuration = requested_configuration
 
         if self.execution_timeout_seconds <= 0:
             raise ValueError("execution_timeout_seconds must be greater than zero.")
@@ -152,6 +160,17 @@ class EvaluationRunner:
                     model_name=getattr(self.provider, "model_name", "unknown-model"),
                     status=RunStatus.QUEUED.value,
                     is_simulated=self._is_simulated(),
+                    configuration_verified=True,
+                )
+                db_run.run_configuration = build_single_run_configuration(
+                    dataset=dataset_version_snapshot(db_dataset, db_version),
+                    provider=self.provider,
+                    evaluators=self.registry.get_all(),
+                    concurrency_limit=self.concurrency_limit,
+                    execution_timeout_seconds=self.execution_timeout_seconds,
+                    result_batch_size=self.result_batch_size,
+                    is_simulated=self._is_simulated(),
+                    requested_configuration=self.requested_configuration,
                 )
             else:
                 if dataset_path is None:
@@ -172,6 +191,17 @@ class EvaluationRunner:
                     model_name=getattr(self.provider, "model_name", "unknown-model"),
                     status=RunStatus.QUEUED.value,
                     is_simulated=self._is_simulated(),
+                    configuration_verified=True,
+                )
+                db_run.run_configuration = build_single_run_configuration(
+                    dataset=dataset_path_snapshot(dataset_path),
+                    provider=self.provider,
+                    evaluators=self.registry.get_all(),
+                    concurrency_limit=self.concurrency_limit,
+                    execution_timeout_seconds=self.execution_timeout_seconds,
+                    result_batch_size=self.result_batch_size,
+                    is_simulated=self._is_simulated(),
+                    requested_configuration=self.requested_configuration,
                 )
 
             db.add(db_run)

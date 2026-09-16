@@ -77,9 +77,24 @@ class EvaluationRunDB(Base):
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     is_simulated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    run_configuration_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    configuration_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     dataset: Mapped[DatasetDB] = relationship(back_populates="runs")
     results: Mapped[list["EvaluationResultDB"]] = relationship(back_populates="run", cascade="all, delete-orphan")
+
+    @property
+    def run_configuration(self) -> Optional[Dict[str, Any]]:
+        if not self.run_configuration_json:
+            return None
+        try:
+            return json.loads(self.run_configuration_json)
+        except json.JSONDecodeError:
+            return None
+
+    @run_configuration.setter
+    def run_configuration(self, val: Optional[Dict[str, Any]]) -> None:
+        self.run_configuration_json = json.dumps(val) if val is not None else None
 
 
 class EvaluationResultDB(Base):
@@ -129,9 +144,24 @@ class PairwiseRunDB(Base):
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     is_simulated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    run_configuration_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    configuration_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     dataset: Mapped[DatasetDB] = relationship()
     comparisons: Mapped[list["PairwiseComparisonDB"]] = relationship(back_populates="run", cascade="all, delete-orphan")
+
+    @property
+    def run_configuration(self) -> Optional[Dict[str, Any]]:
+        if not self.run_configuration_json:
+            return None
+        try:
+            return json.loads(self.run_configuration_json)
+        except json.JSONDecodeError:
+            return None
+
+    @run_configuration.setter
+    def run_configuration(self, val: Optional[Dict[str, Any]]) -> None:
+        self.run_configuration_json = json.dumps(val) if val is not None else None
 
 
 class PairwiseComparisonDB(Base):
