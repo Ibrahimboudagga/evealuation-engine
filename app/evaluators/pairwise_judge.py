@@ -111,9 +111,14 @@ You MUST reply ONLY with a JSON object in this format (no markdown formatting, n
             parsed_data = self._extract_and_parse_json(raw_response)
             judge_res = PairwiseJudgeResponse.model_validate(parsed_data)
 
-            # Normalize winner to canonical form
-            winner = judge_res.winner.strip().upper()
-            winner = winner if winner in ("A", "B") else "tie"
+            # Accept only valid labels, then store the canonical representation.
+            raw_winner = judge_res.winner.strip()
+            if raw_winner.upper() in ("A", "B"):
+                winner = raw_winner.upper()
+            elif raw_winner.lower() == "tie":
+                winner = "tie"
+            else:
+                raise ValueError(f"Invalid pairwise winner: {judge_res.winner!r}")
 
             # Normalize scores from 1-10 to 0.0-1.0
             normalized_a = judge_res.score_a / 10.0

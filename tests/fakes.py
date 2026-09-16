@@ -16,6 +16,7 @@ class FakeProviderMode(str, Enum):
     VALID_JUDGE = "valid_judge"
     VALID_PAIRWISE_JUDGE = "valid_pairwise_judge"
     VALID_PAIRWISE_TIE = "valid_pairwise_tie"
+    INVALID_PAIRWISE_WINNER = "invalid_pairwise_winner"
     MALFORMED_JSON = "malformed_json"
     ERROR = "error"
 
@@ -45,6 +46,10 @@ class DeterministicFakeProvider(BaseProvider):
     @classmethod
     def valid_pairwise_tie(cls) -> "DeterministicFakeProvider":
         return cls(FakeProviderMode.VALID_PAIRWISE_TIE)
+
+    @classmethod
+    def invalid_pairwise_winner(cls) -> "DeterministicFakeProvider":
+        return cls(FakeProviderMode.INVALID_PAIRWISE_WINNER)
 
     @classmethod
     def malformed_json(cls) -> "DeterministicFakeProvider":
@@ -83,6 +88,16 @@ class DeterministicFakeProvider(BaseProvider):
                     "score_a": 7,
                     "score_b": 7,
                     "reason": "deterministic pairwise tie",
+                }
+            ), {"prompt_tokens": 13, "completion_tokens": 9}
+
+        if self.mode is FakeProviderMode.INVALID_PAIRWISE_WINNER:
+            return json.dumps(
+                {
+                    "winner": "draw",
+                    "score_a": 7,
+                    "score_b": 7,
+                    "reason": "invalid winner label",
                 }
             ), {"prompt_tokens": 13, "completion_tokens": 9}
 
