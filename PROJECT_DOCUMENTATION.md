@@ -990,6 +990,12 @@ Each API or CLI submission creates a queued database record before any provider 
 
 The API has one process-local execution worker. It runs submitted evaluations serially and commits completed results in batches of ten. Provider generation and judge calls use a 60-second timeout, which becomes a visible generation or evaluation error rather than an indefinitely running request. On startup, the application marks queued or running records left by a stopped worker as `interrupted`. This recovery policy is intentionally limited to the single-worker deployment; a multi-worker deployment needs worker ownership and heartbeats before it can reconcile abandoned records safely.
 
+### Reproducible Configuration Snapshot
+
+New single-model and pairwise runs persist a JSON configuration snapshot before any provider call. The snapshot contains the registered dataset version or a legacy-path content hash, actual provider implementation and model identifiers, evaluator and judge prompt settings, concurrency, timeout, batch size, requested provider selections, and whether the run is simulated. Provider credentials are redacted before persistence. `GET /runs/{run_id}` and `GET /pairwise-runs/{run_id}` include this value as `run_configuration`, together with `configuration_verified`. Gradio displays the same snapshot in the execution configuration panel so a run report can explain its execution settings.
+
+Historical runs that predate this snapshot have `configuration_verified: false`; their missing settings are not inferred.
+
 ### Startup Behavior
 
 On FastAPI startup, `init_db()` runs Alembic migrations to bring the configured database to the latest schema version. Existing records are preserved; historical results created before explicit outcomes are labelled `unverified`.

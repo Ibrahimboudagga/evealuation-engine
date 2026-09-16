@@ -56,6 +56,8 @@ class RunStatusResponse(BaseModel):
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     is_simulated: bool = False
+    run_configuration: Optional[Dict[str, Any]] = None
+    configuration_verified: bool = False
 
 
 class RunListItem(BaseModel):
@@ -214,6 +216,8 @@ class PairwiseRunStatusResponse(BaseModel):
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     is_simulated: bool = False
+    run_configuration: Optional[Dict[str, Any]] = None
+    configuration_verified: bool = False
 
 
 class PairwiseRunListItem(BaseModel):
