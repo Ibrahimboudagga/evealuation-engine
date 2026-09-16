@@ -58,7 +58,17 @@ async def get_run_status(run_id):
                 return status, None
             rows = []
             for m in metrics:
-                rows.append([m["evaluator"], m["mean_score"], m["pass_rate"], m["n"]])
+                has_valid_evaluations = m["mean_score"] is not None
+                rows.append([
+                    m["evaluator"],
+                    f"{m['mean_score']:.3f}" if has_valid_evaluations else "No valid evaluations.",
+                    f"{m['pass_rate']:.1%}" if m["pass_rate"] is not None else "—",
+                    f"{m['valid_evaluations']}/{m['total_cases']}",
+                    f"{m['evaluation_coverage']:.1%}",
+                    m["generation_errors"],
+                    m["evaluation_errors"],
+                    m["passing_evaluations"],
+                ])
             return status, rows
     except httpx.HTTPStatusError as e:
         return f"HTTP {e.response.status_code}: {e.response.text}", None
@@ -133,14 +143,19 @@ async def get_pairwise_status(run_id):
 
             m = metrics
             metrics_rows = [
-                ["Win Rate A", f"{m['win_rate_a']:.1%}"],
-                ["Win Rate B", f"{m['win_rate_b']:.1%}"],
-                ["Tie Rate", f"{m['tie_rate']:.1%}"],
-                ["Elo A", m["elo_a"]],
-                ["Elo B", m["elo_b"]],
-                ["Avg Score A", f"{m['avg_score_a']:.3f}"],
-                ["Avg Score B", f"{m['avg_score_b']:.3f}"],
                 ["Total Comparisons", m["total_comparisons"]],
+                ["Valid Comparisons", m["valid_comparisons"]],
+                ["Evaluation Coverage", f"{m['evaluation_coverage']:.1%}"],
+                ["Generation Errors", m["generation_errors"]],
+                ["Evaluation Errors", m["evaluation_errors"]],
+                ["Quality", "Available" if m["valid_comparisons"] else "No valid evaluations."],
+                ["Win Rate A", f"{m['win_rate_a']:.1%}" if m["win_rate_a"] is not None else "—"],
+                ["Win Rate B", f"{m['win_rate_b']:.1%}" if m["win_rate_b"] is not None else "—"],
+                ["Tie Rate", f"{m['tie_rate']:.1%}" if m["tie_rate"] is not None else "—"],
+                ["Elo A", m["elo_a"] if m["elo_a"] is not None else "—"],
+                ["Elo B", m["elo_b"] if m["elo_b"] is not None else "—"],
+                ["Avg Score A", f"{m['avg_score_a']:.3f}" if m["avg_score_a"] is not None else "—"],
+                ["Avg Score B", f"{m['avg_score_b']:.3f}" if m["avg_score_b"] is not None else "—"],
             ]
 
             comp_rows = None
@@ -149,8 +164,8 @@ async def get_pairwise_status(run_id):
                     [
                         c["example_id"],
                         c["winner"],
-                        f"{c['score_a']:.2f}",
-                        f"{c['score_b']:.2f}",
+                        f"{c['score_a']:.2f}" if c["score_a"] is not None else "—",
+                        f"{c['score_b']:.2f}" if c["score_b"] is not None else "—",
                         c["judge_reason"][:80],
                     ]
                     for c in comparisons
@@ -209,7 +224,13 @@ with gr.Blocks(title="LLM Evaluation Engine") as demo:
         run_id_input = gr.Textbox(label="Run ID")
         fetch_btn = gr.Button("Fetch Results", variant="primary")
         status_output = gr.Textbox(label="Status")
-        metrics_output = gr.Dataframe(headers=["Evaluator", "Mean Score", "Pass Rate", "N"], label="Metrics")
+        metrics_output = gr.Dataframe(
+            headers=[
+                "Evaluator", "Mean Score", "Pass Rate", "Valid / Total", "Coverage",
+                "Generation Errors", "Evaluation Errors", "Passing Valid",
+            ],
+            label="Metrics",
+        )
 
         fetch_btn.click(
             fn=get_run_status,

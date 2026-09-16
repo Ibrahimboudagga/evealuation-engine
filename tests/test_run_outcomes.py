@@ -12,8 +12,8 @@ from app.database.models import (
 from app.evaluators.pairwise_judge import PairwiseJudgeEvaluator
 from app.evaluators.registry import EvaluatorRegistry
 from app.providers.openai import OpenAIProvider
-from app.runners.eval_runner import EvaluationRunner
-from app.runners.pairwise_runner import PairwiseEvaluationRunner
+from app.runners.eval_runner import EvaluationRunner, get_run_metrics
+from app.runners.pairwise_runner import PairwiseEvaluationRunner, get_pairwise_run_metrics
 from app.schemas.outcomes import EvaluationOutcome, RunStatus
 from tests.fakes import DeterministicFakeProvider
 
@@ -52,6 +52,16 @@ async def test_generation_failure_is_not_judged_and_has_no_score(one_example_dat
     assert all(result.score is None for result in results)
     assert all(result.error_message == "deterministic fake provider failure" for result in results)
     assert judge_provider.prompts == []
+
+    metrics = get_run_metrics(run_id)
+    for evaluator_metrics in metrics["evaluators"].values():
+        assert evaluator_metrics["total_cases"] == 1
+        assert evaluator_metrics["valid_evaluations"] == 0
+        assert evaluator_metrics["generation_errors"] == 1
+        assert evaluator_metrics["evaluation_errors"] == 0
+        assert evaluator_metrics["evaluation_coverage"] == 0.0
+        assert evaluator_metrics["avg_score"] is None
+        assert evaluator_metrics["pass_rate"] is None
 
 
 @pytest.mark.asyncio
@@ -98,6 +108,15 @@ async def test_pairwise_generation_failure_skips_judging(one_example_dataset):
     assert comparison.score_b is None
     assert "model_a: deterministic fake provider failure" in comparison.error_message
     assert judge_provider.prompts == []
+
+    metrics = get_pairwise_run_metrics(run_id)
+    assert metrics["total_comparisons"] == 1
+    assert metrics["valid_comparisons"] == 0
+    assert metrics["generation_errors"] == 1
+    assert metrics["evaluation_errors"] == 0
+    assert metrics["evaluation_coverage"] == 0.0
+    assert metrics["win_rate_a"] is None
+    assert metrics["elo_a"] is None
 
 
 @pytest.mark.asyncio

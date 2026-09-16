@@ -35,9 +35,15 @@ class RunResponse(BaseModel):
 class EvaluatorMetric(BaseModel):
     """Aggregated metric for a single evaluator within a run."""
     evaluator: str = Field(..., description="Name of the evaluator")
-    mean_score: float = Field(..., description="Average score across all examples")
-    pass_rate: float = Field(..., description="Fraction of examples scoring >= 0.5")
-    n: int = Field(..., description="Number of examples evaluated")
+    total_cases: int = Field(..., description="All expected cases for this evaluator")
+    valid_evaluations: int = Field(..., description="Cases with a completed numeric evaluation")
+    generation_errors: int = Field(..., description="Cases where candidate generation failed")
+    evaluation_errors: int = Field(..., description="Cases where evaluation or judging failed")
+    error_count: int = Field(..., description="Generation and evaluation errors combined")
+    passing_evaluations: int = Field(..., description="Valid evaluations with score >= 0.5")
+    evaluation_coverage: float = Field(..., description="Valid evaluations divided by total cases")
+    mean_score: Optional[float] = Field(default=None, description="Average score over valid evaluations only")
+    pass_rate: Optional[float] = Field(default=None, description="Passing valid evaluations divided by valid evaluations")
 
 
 class RunStatusResponse(BaseModel):
@@ -161,17 +167,22 @@ class PairwiseRunResponse(BaseModel):
 
 class PairwiseMetrics(BaseModel):
     """Aggregated pairwise comparison metrics."""
-    total_comparisons: int = Field(..., description="Total number of comparisons")
+    total_comparisons: int = Field(..., description="All expected pairwise comparisons")
+    valid_comparisons: int = Field(..., description="Comparisons with a completed winner and scores")
+    generation_errors: int = Field(..., description="Comparisons skipped because candidate generation failed")
+    evaluation_errors: int = Field(..., description="Comparisons where judging or parsing failed")
+    error_count: int = Field(..., description="Generation and evaluation errors combined")
+    evaluation_coverage: float = Field(..., description="Valid comparisons divided by total comparisons")
     wins_a: int = Field(..., description="Number of wins for model A")
     wins_b: int = Field(..., description="Number of wins for model B")
     ties: int = Field(..., description="Number of ties")
-    win_rate_a: float = Field(..., description="Win rate for model A (0.0-1.0)")
-    win_rate_b: float = Field(..., description="Win rate for model B (0.0-1.0)")
-    tie_rate: float = Field(..., description="Tie rate (0.0-1.0)")
-    elo_a: float = Field(..., description="Final Elo rating for model A")
-    elo_b: float = Field(..., description="Final Elo rating for model B")
-    avg_score_a: float = Field(..., description="Average judge score for model A (0.0-1.0)")
-    avg_score_b: float = Field(..., description="Average judge score for model B (0.0-1.0)")
+    win_rate_a: Optional[float] = Field(default=None, description="Wins for A divided by valid comparisons")
+    win_rate_b: Optional[float] = Field(default=None, description="Wins for B divided by valid comparisons")
+    tie_rate: Optional[float] = Field(default=None, description="Ties divided by valid comparisons")
+    elo_a: Optional[float] = Field(default=None, description="Final Elo from valid comparisons only")
+    elo_b: Optional[float] = Field(default=None, description="Final Elo from valid comparisons only")
+    avg_score_a: Optional[float] = Field(default=None, description="Average judge score for A over valid comparisons")
+    avg_score_b: Optional[float] = Field(default=None, description="Average judge score for B over valid comparisons")
 
 
 class PairwiseComparisonItem(BaseModel):
