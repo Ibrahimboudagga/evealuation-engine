@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.schemas.outcomes import EvaluationOutcome, RunStatus
 
@@ -9,7 +9,9 @@ from app.schemas.outcomes import EvaluationOutcome, RunStatus
 
 class RunRequest(BaseModel):
     """Request body for triggering a new evaluation run."""
-    dataset_path: str = Field(..., description="Path to the JSONL dataset file (legacy)")
+    dataset_id: Optional[str] = Field(default=None, description="Registered dataset ID")
+    dataset_version_id: Optional[str] = Field(default=None, description="Immutable dataset version ID; defaults to the active version")
+    dataset_path: Optional[str] = Field(default=None, description="Legacy server-side JSONL path")
     candidate_provider: str = Field(..., description="Candidate provider name (e.g. openai, anthropic, cohere)")
     candidate_model: str = Field(..., description="Candidate model ID / identifier")
     candidate_api_key: Optional[str] = Field(default=None, description="Authentication key for the candidate provider")
@@ -23,6 +25,14 @@ class RunRequest(BaseModel):
     evaluator_api_key: Optional[str] = Field(default=None, description="Authentication key for the evaluator model")
     concurrency: int = Field(default=5, ge=1, le=50, description="Maximum parallel evaluations")
     judge_prompt_template: Optional[str] = Field(default=None, description="Optional custom judge prompt template text")
+
+    @model_validator(mode="after")
+    def validate_dataset_source(self) -> "RunRequest":
+        if bool(self.dataset_id) == bool(self.dataset_path):
+            raise ValueError("Provide exactly one of dataset_id or dataset_path.")
+        if self.dataset_version_id and not self.dataset_id:
+            raise ValueError("dataset_version_id requires dataset_id.")
+        return self
 
 
 class RunResponse(BaseModel):
@@ -142,7 +152,9 @@ class DatasetSetActiveVersionRequest(BaseModel):
 
 class PairwiseRunRequest(BaseModel):
     """Request body for triggering a pairwise evaluation run."""
-    dataset_path: str = Field(..., description="Path to the JSONL dataset file")
+    dataset_id: Optional[str] = Field(default=None, description="Registered dataset ID")
+    dataset_version_id: Optional[str] = Field(default=None, description="Immutable dataset version ID; defaults to the active version")
+    dataset_path: Optional[str] = Field(default=None, description="Legacy server-side JSONL path")
     model_a_provider: str = Field(..., description="Model A provider name")
     model_a_model: str = Field(..., description="Model A model ID")
     model_a_api_key: Optional[str] = Field(default=None, description="Model A API key")
@@ -158,6 +170,14 @@ class PairwiseRunRequest(BaseModel):
     judge_api_key: Optional[str] = Field(default=None, description="Judge API key")
     judge_prompt_template: Optional[str] = Field(default=None, description="Custom pairwise judge prompt template")
     concurrency: int = Field(default=5, ge=1, le=50, description="Maximum parallel comparisons")
+
+    @model_validator(mode="after")
+    def validate_dataset_source(self) -> "PairwiseRunRequest":
+        if bool(self.dataset_id) == bool(self.dataset_path):
+            raise ValueError("Provide exactly one of dataset_id or dataset_path.")
+        if self.dataset_version_id and not self.dataset_id:
+            raise ValueError("dataset_version_id requires dataset_id.")
+        return self
 
 
 class PairwiseRunResponse(BaseModel):

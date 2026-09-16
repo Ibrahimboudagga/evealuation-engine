@@ -195,7 +195,8 @@ Trigger a new evaluation run in the background.
 
 ```json
 {
-  "dataset_path": "datasets/sample.jsonl",
+  "dataset_id": "uuid-string",
+  "dataset_version_id": "uuid-string",
   "candidate_provider": "openai",
   "candidate_model": "gpt-4o",
   "candidate_api_key": "sk-...",
@@ -206,6 +207,8 @@ Trigger a new evaluation run in the background.
   "judge_prompt_template": null
 }
 ```
+
+Use a registered `dataset_id` and immutable `dataset_version_id` for application submissions. `dataset_path` remains available only for legacy API and CLI automation; do not send both sources.
 
 **Response (`200`):**
 
@@ -272,7 +275,8 @@ Trigger a new pairwise evaluation run comparing two models.
 
 ```json
 {
-  "dataset_path": "datasets/sample.jsonl",
+  "dataset_id": "uuid-string",
+  "dataset_version_id": "uuid-string",
   "model_a_provider": "openai",
   "model_a_model": "gpt-4o",
   "model_a_api_key": "sk-...",
@@ -456,14 +460,18 @@ Delete a dataset and all its versions.
 
 ## Gradio Web UI
 
-The Gradio interface provides four tabs:
+The Gradio interface provides five tabs:
 
-### Tab 1 -- Run Evaluation
+### Tab 1 -- Datasets
+
+Upload a UTF-8 `.jsonl` file to create a dataset and active version. Select an existing dataset to upload a new immutable version or set a prior version active. JSONL is validated by the API before it is stored.
+
+### Tab 2 -- Run Evaluation
 
 Fill in all fields and click **Submit Run**. The UI sends a `POST` to the FastAPI server and displays the returned `run_id` and status.
 
 Inputs:
-- Dataset Path
+- Dataset and immutable Dataset Version selectors
 - Candidate Provider (dropdown: openai, anthropic, cohere, gemini, mock)
 - Candidate Model
 - Candidate API Key (password field)
@@ -473,7 +481,7 @@ Inputs:
 - Concurrency (slider, 1-20)
 - Judge Prompt Template (optional, multiline)
 
-### Tab 2 -- View Results
+### Tab 3 -- View Results
 
 Enter a Run ID and click **Fetch Results**. The UI queries the API and displays:
 - Lifecycle status, including `queued`, `running`, `completed`, `failed`, and `interrupted`
@@ -481,18 +489,18 @@ Enter a Run ID and click **Fetch Results**. The UI queries the API and displays:
 - Any sanitized run error
 - Metrics with valid-result counts, coverage, generation errors, and evaluation errors
 
-### Tab 3 -- Pairwise Evaluation
+### Tab 4 -- Pairwise Evaluation
 
 Compare two models side-by-side on the same dataset.
 
 Inputs:
-- Dataset Path
+- Dataset and immutable Dataset Version selectors
 - Model A: Provider, Model, API Key, Base URL (optional)
 - Model B: Provider, Model, API Key, Base URL (optional)
 - Judge: Provider, Model, API Key
 - Concurrency (slider, 1-20)
 
-### Tab 4 -- Pairwise Results
+### Tab 5 -- Pairwise Results
 
 Enter a Pairwise Run ID and click **Fetch Results**. Displays:
 - Run status with model names, simulation label, and any sanitized error

@@ -918,6 +918,7 @@ The FastAPI application exposes endpoints for runs, pairwise runs, and dataset m
 Trigger a new evaluation run.
 
 - Validates the request body with `RunRequest`.
+- Accepts a registered `dataset_id` and optional `dataset_version_id` (the active version is used if omitted). `dataset_path` is retained only for legacy automation, and cannot be combined with a dataset ID.
 - Creates providers through `ProviderFactory`.
 - Creates a queued database run and returns its ID immediately.
 - Spawns the actual evaluation as a background task via `asyncio.create_task`.
@@ -941,6 +942,7 @@ List all tracked runs.
 Trigger a new pairwise evaluation run.
 
 - Validates the request body with `PairwiseRunRequest`.
+- Accepts the same versioned dataset selection as `POST /runs`.
 - Creates providers for Model A, Model B, and the Judge.
 - Creates a `PairwiseJudgeEvaluator` and `PairwiseEvaluationRunner`.
 - Returns the run ID immediately; evaluation runs in the background.
@@ -1016,13 +1018,18 @@ A standalone Gradio application that communicates with the FastAPI layer via `ht
 
 ### Layout
 
-Uses `gr.Blocks()` with four tabs:
+Uses `gr.Blocks()` with five tabs:
 
-**Tab 1 -- Run Evaluation**
+**Tab 1 -- Datasets**
+
+Users upload UTF-8 JSONL files, create immutable versions, and select the active version. The API validates every uploaded file before storing it.
+
+**Tab 2 -- Run Evaluation**
 
 | Input | Type | Default |
 |---|---|---|
-| Dataset Path | Textbox | `datasets/sample.jsonl` |
+| Dataset | Dropdown | loaded from the dataset registry |
+| Dataset Version | Dropdown | active version selected by default |
 | Candidate Provider | Dropdown | `openai` |
 | Candidate Model | Textbox | `gpt-4o` |
 | Candidate API Key | Textbox (password) | empty |
@@ -1034,7 +1041,7 @@ Uses `gr.Blocks()` with four tabs:
 
 On submit: POST to `http://localhost:8000/runs`, display the returned `run_id` and status in a `gr.JSON` output component.
 
-**Tab 2 -- View Results**
+**Tab 3 -- View Results**
 
 | Input | Type |
 |---|---|
@@ -1044,11 +1051,12 @@ On submit: GET `http://localhost:8000/runs/{run_id}`, display:
 - Run status as a `gr.Textbox`
 - Metrics as a `gr.Dataframe` with columns: Evaluator, Mean Score, Pass Rate, N
 
-**Tab 3 -- Pairwise Evaluation**
+**Tab 4 -- Pairwise Evaluation**
 
 | Input | Type | Default |
 |---|---|---|
-| Dataset Path | Textbox | `datasets/sample.jsonl` |
+| Dataset | Dropdown | loaded from the dataset registry |
+| Dataset Version | Dropdown | active version selected by default |
 | Model A Provider | Dropdown | `openai` |
 | Model A Model | Textbox | `gpt-4o` |
 | Model A API Key | Textbox (password) | empty |
@@ -1064,7 +1072,7 @@ On submit: GET `http://localhost:8000/runs/{run_id}`, display:
 
 On submit: POST to `http://localhost:8000/pairwise-runs`, display the returned `run_id` and status.
 
-**Tab 4 -- Pairwise Results**
+**Tab 5 -- Pairwise Results**
 
 | Input | Type |
 |---|---|
