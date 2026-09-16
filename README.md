@@ -92,7 +92,7 @@ On Windows PowerShell:
 Copy-Item .env.example .env
 ```
 
-Edit `.env` and fill in API keys for the providers you intend to use. If keys are omitted, providers fall back to mock mode automatically.
+Edit `.env` and fill in API keys for the providers you intend to use. Missing credentials stop the request with a configuration error. Use the explicit `mock` provider or `mock` model for demo mode; simulated runs are marked in the API and UI.
 
 ### 3. Run the CLI
 
@@ -525,12 +525,14 @@ All settings are in `app/config.py` and loaded from environment variables or `.e
 | `GEMINI_API_KEY` | Gemini API key | empty |
 | `GOOGLE_API_KEY` | Alternate Gemini key | empty |
 | `COHERE_API_KEY` | Cohere API key | empty |
-| `DEFAULT_CANDIDATE_PROVIDER` | Default candidate provider | `openai` |
+| `DEFAULT_CANDIDATE_PROVIDER` | Default candidate provider | `mock` |
 | `DEFAULT_CANDIDATE_MODEL` | Default candidate model | `mock` |
-| `DEFAULT_EVALUATOR_PROVIDER` | Default evaluator provider | `openai` |
+| `DEFAULT_EVALUATOR_PROVIDER` | Default evaluator provider | `mock` |
 | `DEFAULT_EVALUATOR_MODEL` | Default evaluator model | `mock` |
 | `DEFAULT_CONCURRENCY` | Parallel evaluation limit | `3` |
 | `SIMILARITY_MODEL_NAME` | SentenceTransformer model | `all-MiniLM-L6-v2` |
+
+For a local OpenAI-compatible endpoint that deliberately has no authentication, use provider `compatible`, provide its base URL, and set `candidate_allow_unauthenticated` to `true` in the API request (or `--candidate-allow-unauthenticated` in the CLI). This opt-in does not apply to hosted providers.
 
 ---
 

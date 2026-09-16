@@ -1,21 +1,26 @@
 import structlog
 import json
 from typing import Optional, Dict, Any, Tuple
-from app.providers.base import BaseProvider
+from app.providers.base import BaseProvider, ProviderConfigurationError
 from app.config import get_settings
 
 log = structlog.get_logger()
 
 class AnthropicProvider(BaseProvider):
-    def __init__(self, model_name: str = "claude-3-5-sonnet-latest", api_key: str = None):
+    def __init__(self, model_name: str = "claude-3-5-sonnet-latest", api_key: str = None, demo_mode: bool = False):
         self.model_name = model_name
         self.api_key = api_key or get_settings().anthropic_api_key
-        self.is_mock = not self.api_key or self.api_key == "mock" or self.model_name == "mock"
+        self.is_mock = demo_mode or self.api_key == "mock" or self.model_name == "mock"
         
         if self.is_mock:
             log.warning("using_mock_mode", provider="AnthropicProvider", model=self.model_name)
             self.client = None
         else:
+            if not self.api_key:
+                raise ProviderConfigurationError(
+                    "Anthropic requires an API key. Set ANTHROPIC_API_KEY or pass api_key; "
+                    "select mock explicitly for demo mode."
+                )
             from anthropic import AsyncAnthropic
             self.client = AsyncAnthropic(api_key=self.api_key)
 

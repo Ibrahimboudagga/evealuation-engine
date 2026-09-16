@@ -1,9 +1,14 @@
 import pytest
 import json
+from types import SimpleNamespace
+from fastapi.testclient import TestClient
+from app.api.main import app
 from app.providers.factory import ProviderFactory
+from app.providers.base import ProviderConfigurationError
 from app.providers.openai import OpenAIProvider
 from app.providers.anthropic import AnthropicProvider
 from app.providers.gemini import GeminiProvider
+from app.providers.cohere import CohereProvider
 
 def test_provider_factory_resolution():
     openai_mock = ProviderFactory.create("openai-mock")
@@ -62,3 +67,82 @@ def test_provider_factory_agnostic_creation():
     assert isinstance(custom_provider, OpenAIProvider)
     assert custom_provider.model_name == "custom-model"
     assert custom_provider.base_url == "https://api-inference.huggingface.co/models/custom-model"
+
+
+def test_unknown_provider_is_rejected():
+    with pytest.raises(ProviderConfigurationError, match="Unknown provider"):
+        ProviderFactory.create(provider="not-a-provider", model_id="model", api_key="key")
+
+
+@pytest.mark.parametrize(
+    ("provider_class", "settings_target", "settings"),
+    [
+        (OpenAIProvider, "app.providers.openai.get_settings", SimpleNamespace(openai_api_key=None)),
+        (AnthropicProvider, "app.providers.anthropic.get_settings", SimpleNamespace(anthropic_api_key=None)),
+        (GeminiProvider, "app.providers.gemini.get_settings", SimpleNamespace(gemini_api_key=None, google_api_key=None)),
+        (CohereProvider, "app.providers.cohere.get_settings", SimpleNamespace(cohere_api_key=None)),
+    ],
+)
+def test_missing_credentials_raise_configuration_error(monkeypatch, provider_class, settings_target, settings):
+    monkeypatch.setattr(settings_target, lambda: settings)
+    with pytest.raises(ProviderConfigurationError, match="requires an API key"):
+        provider_class(model_name="real-model")
+
+
+def test_compatible_endpoint_can_be_explicitly_unauthenticated(monkeypatch):
+    monkeypatch.setattr(
+        "app.providers.openai.get_settings",
+        lambda: SimpleNamespace(openai_api_key="must-not-be-sent"),
+    )
+    provider = ProviderFactory.create(
+        provider="compatible",
+        model_id="local-model",
+        base_url="http://localhost:11434/v1",
+        allow_unauthenticated=True,
+    )
+    assert isinstance(provider, OpenAIProvider)
+    assert provider.is_mock is False
+    assert provider.api_key is None
+
+
+def test_unauthenticated_access_requires_explicit_compatible_configuration(monkeypatch):
+    monkeypatch.setattr(
+        "app.providers.openai.get_settings",
+        lambda: SimpleNamespace(openai_api_key=None),
+    )
+    with pytest.raises(ProviderConfigurationError, match="API key"):
+        ProviderFactory.create(
+            provider="compatible",
+            model_id="local-model",
+            base_url="http://localhost:11434/v1",
+        )
+    with pytest.raises(ProviderConfigurationError, match="only supported"):
+        ProviderFactory.create(
+            provider="groq",
+            model_id="model",
+            allow_unauthenticated=True,
+        )
+
+
+def test_api_rejects_missing_credential_before_creating_a_run(monkeypatch, tmp_path):
+    dataset = tmp_path / "dataset.jsonl"
+    dataset.write_text('{"input": "hello", "expected_output": "hello"}\n', encoding="utf-8")
+    monkeypatch.setattr(
+        "app.providers.openai.get_settings",
+        lambda: SimpleNamespace(openai_api_key=None),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/runs",
+            json={
+                "dataset_path": str(dataset),
+                "candidate_provider": "openai",
+                "candidate_model": "gpt-4o",
+                "evaluator_provider": "mock",
+                "evaluator_model": "mock",
+            },
+        )
+
+    assert response.status_code == 400
+    assert "requires an API key" in response.json()["detail"]

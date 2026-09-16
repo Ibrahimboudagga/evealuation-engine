@@ -311,8 +311,6 @@ class TestPairwiseAPI:
         assert resp.status_code == 400
 
     def test_create_pairwise_run_invalid_provider(self, client, temp_jsonl):
-        # ProviderFactory defaults unknown providers to OpenAI (with warning),
-        # so this will return 200 (background task started), not 400.
         resp = client.post("/pairwise-runs", json={
             "dataset_path": temp_jsonl,
             "model_a_provider": "nonexistent_provider",
@@ -322,5 +320,5 @@ class TestPairwiseAPI:
             "judge_provider": "openai",
             "judge_model": "mock",
         })
-        assert resp.status_code == 200
-        assert "run_id" in resp.json()
+        assert resp.status_code == 400
+        assert "Unknown provider" in resp.json()["detail"]

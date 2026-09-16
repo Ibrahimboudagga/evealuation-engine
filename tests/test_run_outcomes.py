@@ -46,7 +46,7 @@ async def test_generation_failure_is_not_judged_and_has_no_score(one_example_dat
     assert run.status == RunStatus.COMPLETED.value
     assert run.started_at is not None
     assert run.completed_at is not None
-    assert run.is_simulated is False
+    assert run.is_simulated is True
     assert len(results) == 3
     assert all(result.outcome == EvaluationOutcome.GENERATION_ERROR.value for result in results)
     assert all(result.score is None for result in results)

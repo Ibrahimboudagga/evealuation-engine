@@ -48,6 +48,8 @@ async def get_run_status(run_id):
             resp.raise_for_status()
             data = resp.json()
             status = data.get("status", "unknown")
+            if data.get("is_simulated"):
+                status = f"SIMULATED — {status}"
             metrics = data.get("metrics")
             error = data.get("error")
             if error:
@@ -117,6 +119,8 @@ async def get_pairwise_status(run_id):
             resp.raise_for_status()
             data = resp.json()
             status = data.get("status", "unknown")
+            if data.get("is_simulated"):
+                status = f"SIMULATED — {status}"
             model_a = data.get("model_a_name", "?")
             model_b = data.get("model_b_name", "?")
             error = data.get("error")

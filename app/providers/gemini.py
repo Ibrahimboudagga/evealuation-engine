@@ -1,23 +1,28 @@
 import structlog
 import json
 from typing import Optional, Dict, Any, Tuple
-from app.providers.base import BaseProvider
+from app.providers.base import BaseProvider, ProviderConfigurationError
 from app.config import get_settings
 
 log = structlog.get_logger()
 
 class GeminiProvider(BaseProvider):
-    def __init__(self, model_name: str = "gemini-1.5-flash", api_key: str = None):
+    def __init__(self, model_name: str = "gemini-1.5-flash", api_key: str = None, demo_mode: bool = False):
         self.model_name = model_name
         settings = get_settings()
         # google-generativeai client library uses GEMINI_API_KEY or GOOGLE_API_KEY
         self.api_key = api_key or settings.gemini_api_key or settings.google_api_key
-        self.is_mock = not self.api_key or self.api_key == "mock" or self.model_name == "mock"
+        self.is_mock = demo_mode or self.api_key == "mock" or self.model_name == "mock"
         
         if self.is_mock:
             log.warning("using_mock_mode", provider="GeminiProvider", model=self.model_name)
             self.model = None
         else:
+            if not self.api_key:
+                raise ProviderConfigurationError(
+                    "Gemini requires an API key. Set GEMINI_API_KEY or GOOGLE_API_KEY, or pass api_key; "
+                    "select mock explicitly for demo mode."
+                )
             import google.generativeai as genai
             genai.configure(api_key=self.api_key)
             self.model = genai.GenerativeModel(model_name)

@@ -23,6 +23,8 @@ class FakeProviderMode(str, Enum):
 class DeterministicFakeProvider(BaseProvider):
     """A configurable provider whose behavior is stable across test runs."""
 
+    is_mock = True
+
     def __init__(self, mode: FakeProviderMode = FakeProviderMode.SUCCESS):
         self.mode = mode
         self.model_name = f"deterministic-fake-{mode.value}"

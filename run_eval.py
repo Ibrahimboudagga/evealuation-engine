@@ -64,6 +64,11 @@ async def main():
         default=None,
         help="Custom API base URL endpoint (for Groq, Hugging Face, or compatible endpoints)"
     )
+    parser.add_argument(
+        "--candidate-allow-unauthenticated",
+        action="store_true",
+        help="Allow a keyless request only for --candidate-provider compatible with --candidate-base-url"
+    )
     
     # --- EVALUATOR MODEL OPTIONS (Fixed Selection Judge) ---
     parser.add_argument(
@@ -136,7 +141,8 @@ async def main():
             provider=candidate_provider,
             model_id=candidate_model,
             api_key=args.candidate_api_key,
-            base_url=args.candidate_base_url
+            base_url=args.candidate_base_url,
+            allow_unauthenticated=args.candidate_allow_unauthenticated,
         )
     except Exception as e:
         log.error("error_initializing_candidate_provider", error=str(e))
@@ -165,6 +171,8 @@ async def main():
         registry=registry, 
         concurrency_limit=args.concurrency
     )
+    if runner._is_simulated():
+        log.warning("simulated_run", message="Demo/mock provider output will be stored as simulated.")
     
     # 6. Run the evaluation
     log.info("generating_predictions_and_executing_evaluators")
