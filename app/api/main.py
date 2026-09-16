@@ -183,9 +183,15 @@ async def get_run(run_id: str):
         evaluator_metrics = [
             EvaluatorMetric(
                 evaluator=name,
+                total_cases=data["total_cases"],
+                valid_evaluations=data["valid_evaluations"],
+                generation_errors=data["generation_errors"],
+                evaluation_errors=data["evaluation_errors"],
+                error_count=data["error_count"],
+                passing_evaluations=data["passing_evaluations"],
+                evaluation_coverage=data["evaluation_coverage"],
                 mean_score=data["avg_score"],
                 pass_rate=data["pass_rate"],
-                n=data["count"],
             )
             for name, data in metrics.get("evaluators", {}).items()
         ]
@@ -425,6 +431,11 @@ async def get_pairwise_run(run_id: str, include_comparisons: bool = Query(defaul
         if metrics:
             pw_metrics = PairwiseMetrics(
                 total_comparisons=metrics["total_comparisons"],
+                valid_comparisons=metrics["valid_comparisons"],
+                generation_errors=metrics["generation_errors"],
+                evaluation_errors=metrics["evaluation_errors"],
+                error_count=metrics["error_count"],
+                evaluation_coverage=metrics["evaluation_coverage"],
                 wins_a=metrics["wins_a"],
                 wins_b=metrics["wins_b"],
                 ties=metrics["ties"],

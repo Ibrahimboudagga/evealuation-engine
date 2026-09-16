@@ -1158,24 +1158,28 @@ If the pairwise judge fails:
 
 After an evaluation run completes, aggregated metrics are available via CLI output or the REST API. For each evaluator, the metrics include:
 
-- **Average Score (mean_score)**: The mean of all normalized scores across examples.
-- **Pass Rate**: The fraction of examples where the score is `>= 0.5`.
-- **Count (n)**: The number of examples evaluated.
+- **Total Cases**: Every expected example for the evaluator.
+- **Valid Evaluations**: Cases with an `evaluated` outcome and numeric score.
+- **Generation and Evaluation Errors**: Separate failure counts that remain visible in the report.
+- **Evaluation Coverage**: `valid_evaluations / total_cases`.
+- **Average Score and Pass Rate**: Quality measures calculated only from valid evaluations.
 
 Pass rate is computed as:
 
 ```python
-pass_rate = count(score >= 0.5) / total_examples
+pass_rate = passing_valid_evaluations / valid_evaluations
 ```
+
+When `valid_evaluations` is zero, average score and pass rate are `null` and the UI shows **“No valid evaluations.”**
 
 ### Pairwise Metrics
 
 After a pairwise evaluation run, metrics include:
 
-- **Win Rate A/B**: Fraction of comparisons each model won.
-- **Tie Rate**: Fraction of comparisons with no clear winner.
-- **Elo Ratings**: Self-correcting strength ratings (starting at 1500, K=32).
-- **Average Scores**: Mean judge scores for each model.
+- **Win Rate A/B and Tie Rate**: Fractions over valid comparisons only.
+- **Evaluation Coverage**: `valid_comparisons / total_comparisons`, with generation and judge-error counts included separately.
+- **Elo Ratings**: Calculated from valid comparisons only (starting at 1500, K=32).
+- **Average Scores**: Mean judge scores from valid comparisons only.
 
 ### Sample Report Output
 

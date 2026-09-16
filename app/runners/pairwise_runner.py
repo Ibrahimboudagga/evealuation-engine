@@ -441,15 +441,26 @@ def get_pairwise_run_metrics(run_id: str) -> Dict[str, Any]:
     if not comparisons:
         return {}
 
+    total_comparisons = len(comparisons)
     evaluated_comparisons = [
         comparison
         for comparison in comparisons
-        if comparison.outcome == EvaluationOutcome.EVALUATED.value and comparison.winner is not None
+        if (
+            comparison.outcome == EvaluationOutcome.EVALUATED.value
+            and comparison.winner is not None
+            and comparison.score_a is not None
+            and comparison.score_b is not None
+        )
     ]
-    if not evaluated_comparisons:
-        return {}
-
-    total = len(evaluated_comparisons)
+    valid_comparisons = len(evaluated_comparisons)
+    generation_errors = sum(
+        comparison.outcome == EvaluationOutcome.GENERATION_ERROR.value
+        for comparison in comparisons
+    )
+    evaluation_errors = sum(
+        comparison.outcome == EvaluationOutcome.EVALUATION_ERROR.value
+        for comparison in comparisons
+    )
     wins_a = sum(1 for c in evaluated_comparisons if c.winner == "A")
     wins_b = sum(1 for c in evaluated_comparisons if c.winner == "B")
     ties = sum(1 for c in evaluated_comparisons if c.winner == "tie")
@@ -457,17 +468,24 @@ def get_pairwise_run_metrics(run_id: str) -> Dict[str, Any]:
     # Compute Elo ratings
     elo_a = ELO_INITIAL
     elo_b = ELO_INITIAL
-    for c in evaluated_comparisons:
-        if c.winner == "A":
-            score_a = 1.0
-        elif c.winner == "B":
-            score_a = 0.0
-        else:
-            score_a = 0.5
-        elo_a, elo_b = _elo_update(elo_a, elo_b, score_a)
+    if valid_comparisons:
+        for c in evaluated_comparisons:
+            if c.winner == "A":
+                score_a = 1.0
+            elif c.winner == "B":
+                score_a = 0.0
+            else:
+                score_a = 0.5
+            elo_a, elo_b = _elo_update(elo_a, elo_b, score_a)
 
-    avg_score_a = sum(c.score_a for c in evaluated_comparisons if c.score_a is not None) / total
-    avg_score_b = sum(c.score_b for c in evaluated_comparisons if c.score_b is not None) / total
+    avg_score_a = (
+        sum(c.score_a for c in evaluated_comparisons) / valid_comparisons
+        if valid_comparisons else None
+    )
+    avg_score_b = (
+        sum(c.score_b for c in evaluated_comparisons) / valid_comparisons
+        if valid_comparisons else None
+    )
 
     # Get model names from the run
     with get_db() as db:
@@ -479,17 +497,22 @@ def get_pairwise_run_metrics(run_id: str) -> Dict[str, Any]:
         "run_id": run_id,
         "model_a_name": model_a_name,
         "model_b_name": model_b_name,
-        "total_comparisons": total,
+        "total_comparisons": total_comparisons,
+        "valid_comparisons": valid_comparisons,
+        "generation_errors": generation_errors,
+        "evaluation_errors": evaluation_errors,
+        "error_count": generation_errors + evaluation_errors,
+        "evaluation_coverage": valid_comparisons / total_comparisons if total_comparisons else 0.0,
         "wins_a": wins_a,
         "wins_b": wins_b,
         "ties": ties,
-        "win_rate_a": wins_a / total,
-        "win_rate_b": wins_b / total,
-        "tie_rate": ties / total,
-        "elo_a": round(elo_a, 1),
-        "elo_b": round(elo_b, 1),
-        "avg_score_a": round(avg_score_a, 4),
-        "avg_score_b": round(avg_score_b, 4),
+        "win_rate_a": wins_a / valid_comparisons if valid_comparisons else None,
+        "win_rate_b": wins_b / valid_comparisons if valid_comparisons else None,
+        "tie_rate": ties / valid_comparisons if valid_comparisons else None,
+        "elo_a": round(elo_a, 1) if valid_comparisons else None,
+        "elo_b": round(elo_b, 1) if valid_comparisons else None,
+        "avg_score_a": round(avg_score_a, 4) if avg_score_a is not None else None,
+        "avg_score_b": round(avg_score_b, 4) if avg_score_b is not None else None,
     }
 
 

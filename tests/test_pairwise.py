@@ -219,6 +219,8 @@ class TestPairwiseEvaluationRunner:
         metrics = get_pairwise_run_metrics(run_id)
 
         assert metrics["total_comparisons"] == 2
+        assert metrics["valid_comparisons"] == 2
+        assert metrics["evaluation_coverage"] == 1.0
         assert 0.0 <= metrics["win_rate_a"] <= 1.0
         assert 0.0 <= metrics["win_rate_b"] <= 1.0
         assert 0.0 <= metrics["tie_rate"] <= 1.0

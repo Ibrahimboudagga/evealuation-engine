@@ -417,25 +417,43 @@ def get_run_metrics(run_id: str) -> Dict[str, Any]:
     if not results:
         return {}
         
-    # Only completed evaluations have a numeric quality score.
-    scores_by_evaluator: Dict[str, List[float]] = {}
-    for r in results:
-        if r.outcome == EvaluationOutcome.EVALUATED.value and r.score is not None:
-            scores_by_evaluator.setdefault(r.evaluator_name, []).append(r.score)
-        
+    total_cases = len({result.example_id for result in results})
     metrics = {
         "run_id": run_id,
-        "total_examples": len({result.example_id for result in results}),
+        "total_examples": total_cases,
         "evaluators": {}
     }
-    
-    for eval_name, scores in scores_by_evaluator.items():
-        total = len(scores)
-        pass_count = sum(1 for s in scores if s >= 0.5)
+
+    results_by_evaluator: Dict[str, List[EvaluationResultDB]] = {}
+    for result in results:
+        results_by_evaluator.setdefault(result.evaluator_name, []).append(result)
+
+    for eval_name, evaluator_results in results_by_evaluator.items():
+        valid_scores = [
+            result.score
+            for result in evaluator_results
+            if result.outcome == EvaluationOutcome.EVALUATED.value and result.score is not None
+        ]
+        valid_count = len(valid_scores)
+        generation_errors = sum(
+            result.outcome == EvaluationOutcome.GENERATION_ERROR.value
+            for result in evaluator_results
+        )
+        evaluation_errors = sum(
+            result.outcome == EvaluationOutcome.EVALUATION_ERROR.value
+            for result in evaluator_results
+        )
+        pass_count = sum(1 for score in valid_scores if score >= 0.5)
         metrics["evaluators"][eval_name] = {
-            "avg_score": sum(scores) / total if total else 0.0,
-            "pass_rate": pass_count / total if total else 0.0,
-            "count": total
+            "total_cases": total_cases,
+            "valid_evaluations": valid_count,
+            "generation_errors": generation_errors,
+            "evaluation_errors": evaluation_errors,
+            "error_count": generation_errors + evaluation_errors,
+            "passing_evaluations": pass_count,
+            "evaluation_coverage": valid_count / total_cases if total_cases else 0.0,
+            "avg_score": sum(valid_scores) / valid_count if valid_count else None,
+            "pass_rate": pass_count / valid_count if valid_count else None,
         }
         
     return metrics

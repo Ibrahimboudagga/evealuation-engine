@@ -228,9 +228,18 @@ Get run status and aggregated metrics.
   "run_id": "uuid-string",
   "status": "completed",
   "metrics": [
-    {"evaluator": "exact_match", "mean_score": 0.8, "pass_rate": 0.8, "n": 10},
-    {"evaluator": "semantic_similarity", "mean_score": 0.72, "pass_rate": 0.7, "n": 10},
-    {"evaluator": "llm_judge", "mean_score": 0.85, "pass_rate": 0.9, "n": 10}
+    {
+      "evaluator": "exact_match",
+      "total_cases": 100,
+      "valid_evaluations": 80,
+      "generation_errors": 12,
+      "evaluation_errors": 8,
+      "error_count": 20,
+      "passing_evaluations": 60,
+      "evaluation_coverage": 0.8,
+      "mean_score": 0.75,
+      "pass_rate": 0.75
+    }
   ],
   "error": null
 }
@@ -304,6 +313,11 @@ Get pairwise run status, metrics, and optional per-example comparisons.
   "status": "completed",
   "metrics": {
     "total_comparisons": 50,
+    "valid_comparisons": 45,
+    "generation_errors": 3,
+    "evaluation_errors": 2,
+    "error_count": 5,
+    "evaluation_coverage": 0.9,
     "wins_a": 35,
     "wins_b": 10,
     "ties": 5,
@@ -318,6 +332,8 @@ Get pairwise run status, metrics, and optional per-example comparisons.
   "comparisons": null
 }
 ```
+
+Quality metrics are `null` when no valid evaluations complete. The UI displays **“No valid evaluations.”** in that case.
 
 #### `GET /pairwise-runs`
 

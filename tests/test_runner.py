@@ -74,3 +74,8 @@ async def test_evaluation_runner_pipeline(temp_dataset):
     assert "exact_match" in metrics["evaluators"]
     assert "semantic_similarity" in metrics["evaluators"]
     assert "llm_judge" in metrics["evaluators"]
+    exact_match_metrics = metrics["evaluators"]["exact_match"]
+    assert exact_match_metrics["total_cases"] == 2
+    assert exact_match_metrics["valid_evaluations"] == 2
+    assert exact_match_metrics["evaluation_coverage"] == 1.0
+    assert exact_match_metrics["pass_rate"] == 0.0
