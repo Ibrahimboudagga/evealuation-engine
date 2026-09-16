@@ -123,6 +123,27 @@ async def test_pairwise_judge_failure_has_null_winner(one_example_dataset):
 
 
 @pytest.mark.asyncio
+async def test_invalid_pairwise_winner_is_recorded_as_a_judge_error(one_example_dataset):
+    runner = PairwiseEvaluationRunner(
+        provider_a=DeterministicFakeProvider.successful(),
+        provider_b=DeterministicFakeProvider.successful(),
+        pairwise_evaluator=PairwiseJudgeEvaluator(
+            judge_provider=DeterministicFakeProvider.invalid_pairwise_winner()
+        ),
+    )
+
+    await runner.run_pairwise_evaluation(dataset_path=one_example_dataset)
+
+    with get_db() as db:
+        comparison = db.query(PairwiseComparisonDB).one()
+
+    assert comparison.outcome == EvaluationOutcome.EVALUATION_ERROR.value
+    assert comparison.winner is None
+    assert comparison.score_a is None
+    assert comparison.score_b is None
+
+
+@pytest.mark.asyncio
 async def test_mock_provider_marks_the_run_as_simulated(one_example_dataset):
     runner = EvaluationRunner(
         provider=OpenAIProvider(model_name="mock"),

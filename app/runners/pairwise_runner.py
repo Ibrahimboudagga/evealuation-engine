@@ -238,15 +238,20 @@ class PairwiseEvaluationRunner:
 
             # Un-swap the winner if needed
             if result is not None:
-                winner = result.winner
-                if original_order == "BA":
-                    # Positions were swapped, so un-swap the winner
-                    if winner == "A":
-                        winner = "B"
-                    elif winner == "B":
-                        winner = "A"
-                score_a = result.score_a if original_order == "AB" else result.score_b
-                score_b = result.score_b if original_order == "AB" else result.score_a
+                if result.outcome == EvaluationOutcome.EVALUATED:
+                    winner = result.winner
+                    if original_order == "BA":
+                        # Positions were swapped, so un-swap the winner.
+                        if winner == "A":
+                            winner = "B"
+                        elif winner == "B":
+                            winner = "A"
+                    score_a = result.score_a if original_order == "AB" else result.score_b
+                    score_b = result.score_b if original_order == "AB" else result.score_a
+                else:
+                    winner = None
+                    score_a = None
+                    score_b = None
                 judge_reason = result.reason
                 meta = result.metadata or {}
             else:

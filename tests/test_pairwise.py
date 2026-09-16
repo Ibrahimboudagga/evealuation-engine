@@ -121,7 +121,21 @@ class TestPairwiseJudgeEvaluator:
 
         assert result.winner == "tie"
         assert result.score_a == result.score_b == 0.7
+        assert result.reason == "deterministic pairwise tie"
         assert result.outcome == EvaluationOutcome.EVALUATED
+
+    @pytest.mark.asyncio
+    async def test_evaluate_rejects_an_invalid_winner_instead_of_converting_it_to_a_tie(self):
+        evaluator = PairwiseJudgeEvaluator(
+            judge_provider=DeterministicFakeProvider.invalid_pairwise_winner()
+        )
+
+        result = await evaluator.evaluate("test", "expected", "A", "B")
+
+        assert result.outcome == EvaluationOutcome.EVALUATION_ERROR
+        assert result.winner is None
+        assert result.score_a is None
+        assert result.score_b is None
 
     def test_name_property(self):
         evaluator = PairwiseJudgeEvaluator(

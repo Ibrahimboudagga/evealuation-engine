@@ -248,7 +248,7 @@ class EvaluationRunner:
                     prompt=res.prompt,
                     prediction=res.prediction,
                     expected_output=res.expected_output,
-                    score=res.score,
+                    score=res.score if res.outcome == EvaluationOutcome.EVALUATED else None,
                     evaluator_name=res.evaluator_name,
                     outcome=res.outcome.value,
                     error_message=sanitize_error(res.error_message) if res.error_message else None,
