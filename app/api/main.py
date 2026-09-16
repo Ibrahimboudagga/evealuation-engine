@@ -114,10 +114,12 @@ def startup():
 
 @app.post("/runs", response_model=RunResponse)
 async def create_run(req: RunRequest):
-    try:
-        examples = await asyncio.to_thread(load_dataset, req.dataset_path)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to load dataset: {e}")
+    examples = None
+    if req.dataset_path:
+        try:
+            examples = await asyncio.to_thread(load_dataset, req.dataset_path)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Failed to load dataset: {e}")
 
     try:
         candidate_provider = await asyncio.to_thread(
@@ -164,14 +166,28 @@ async def create_run(req: RunRequest):
         },
     )
 
-    run_id = await asyncio.to_thread(runner.create_run, req.dataset_path)
+    try:
+        run_id = await asyncio.to_thread(
+            runner.create_run,
+            req.dataset_path,
+            req.dataset_id,
+            req.dataset_version_id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     async def _background_run():
         try:
             async with _single_execution_worker:
                 await asyncio.to_thread(
                     lambda: asyncio.run(
-                        runner.run_evaluation(req.dataset_path, examples, run_id=run_id)
+                        runner.run_evaluation(
+                            dataset_path=req.dataset_path,
+                            examples=examples,
+                            dataset_id=req.dataset_id,
+                            dataset_version_id=req.dataset_version_id,
+                            run_id=run_id,
+                        )
                     )
                 )
         except Exception as e:
@@ -357,10 +373,12 @@ async def delete_dataset(dataset_id: str):
 
 @app.post("/pairwise-runs", response_model=PairwiseRunResponse)
 async def create_pairwise_run(req: PairwiseRunRequest):
-    try:
-        examples = await asyncio.to_thread(load_dataset, req.dataset_path)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to load dataset: {e}")
+    examples = None
+    if req.dataset_path:
+        try:
+            examples = await asyncio.to_thread(load_dataset, req.dataset_path)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Failed to load dataset: {e}")
 
     try:
         provider_a = await asyncio.to_thread(
@@ -426,14 +444,28 @@ async def create_pairwise_run(req: PairwiseRunRequest):
         },
     )
 
-    run_id = await asyncio.to_thread(runner.create_run, req.dataset_path)
+    try:
+        run_id = await asyncio.to_thread(
+            runner.create_run,
+            req.dataset_path,
+            req.dataset_id,
+            req.dataset_version_id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     async def _background_pairwise_run():
         try:
             async with _single_execution_worker:
                 await asyncio.to_thread(
                     lambda: asyncio.run(
-                        runner.run_pairwise_evaluation(req.dataset_path, examples, run_id=run_id)
+                        runner.run_pairwise_evaluation(
+                            dataset_path=req.dataset_path,
+                            examples=examples,
+                            dataset_id=req.dataset_id,
+                            dataset_version_id=req.dataset_version_id,
+                            run_id=run_id,
+                        )
                     )
                 )
         except Exception as e:
