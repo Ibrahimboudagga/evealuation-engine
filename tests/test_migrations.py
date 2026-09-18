@@ -108,7 +108,7 @@ def test_migration_creates_a_fresh_database(tmp_path):
     assert {"projects", "datasets", "dataset_versions", "evaluation_runs", "evaluation_results", "pairwise_runs", "pairwise_comparisons"} <= set(inspector.get_table_names())
     assert {column["name"] for column in inspector.get_columns("evaluation_results")} >= {"outcome", "error_message"}
     assert {column["name"] for column in inspector.get_columns("evaluation_runs")} >= {
-        "run_configuration_json", "configuration_verified", "project_id"
+        "run_configuration_json", "configuration_verified", "project_id", "is_baseline"
     }
     assert next(column for column in inspector.get_columns("evaluation_results") if column["name"] == "score")["nullable"]
 
@@ -130,7 +130,7 @@ def test_migration_preserves_copied_legacy_records_and_marks_them_unverified(tmp
     ).fetchone()
     run = connection.execute(
         """SELECT status, is_simulated, started_at, completed_at,
-        run_configuration_json, configuration_verified, project_id FROM evaluation_runs WHERE id = 'run-1'"""
+        run_configuration_json, configuration_verified, project_id, is_baseline FROM evaluation_runs WHERE id = 'run-1'"""
     ).fetchone()
     pairwise_run = connection.execute(
         "SELECT project_id FROM pairwise_runs WHERE id = 'pairwise-1'"
@@ -142,7 +142,7 @@ def test_migration_preserves_copied_legacy_records_and_marks_them_unverified(tmp
 
     assert result == ("wrong", 0.0, "unverified", None)
     assert comparison == ("tie", 0.0, 0.0, "unverified", None)
-    assert run == ("completed", 0, None, None, None, 0, None)
+    assert run == ("completed", 0, None, None, None, 0, None, 0)
     assert pairwise_run == (None,)
     assert dataset == (None,)
 

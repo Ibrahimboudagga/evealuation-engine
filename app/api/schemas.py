@@ -69,6 +69,7 @@ class RunStatusResponse(BaseModel):
     run_configuration: Optional[Dict[str, Any]] = None
     configuration_verified: bool = False
     project_id: Optional[str] = None
+    is_baseline: bool = False
 
 
 class RunListItem(BaseModel):
@@ -78,11 +79,51 @@ class RunListItem(BaseModel):
     created_at: Optional[datetime] = None
     is_simulated: bool = False
     project_id: Optional[str] = None
+    is_baseline: bool = False
 
 
 class RunsListResponse(BaseModel):
     """Response for listing all runs."""
     runs: List[RunListItem]
+
+
+class BaselineMarkResponse(BaseModel):
+    run_id: str
+    is_baseline: bool
+    status: RunStatus
+
+
+class EvaluatorBaselineComparison(BaseModel):
+    evaluator: str
+    baseline_average_score: Optional[float] = None
+    current_average_score: Optional[float] = None
+    average_score_delta: Optional[float] = None
+    baseline_pass_rate: Optional[float] = None
+    current_pass_rate: Optional[float] = None
+    pass_rate_delta: Optional[float] = None
+    baseline_coverage: Optional[float] = None
+    current_coverage: Optional[float] = None
+    coverage_delta: Optional[float] = None
+    baseline_error_count: Optional[int] = None
+    current_error_count: Optional[int] = None
+    error_count_delta: Optional[int] = None
+
+
+class RunComparisonResponse(BaseModel):
+    run_id: str
+    baseline_run_id: str
+    status: Literal["passed", "regressed", "inconclusive"]
+    rules: Dict[str, Optional[float]]
+    reasons: List[str] = Field(default_factory=list)
+    comparisons: List[EvaluatorBaselineComparison] = Field(default_factory=list)
+
+
+class DemoSeedResponse(BaseModel):
+    project_id: str
+    project_name: str
+    client_name: str
+    dataset_ids: List[str]
+    message: str
 
 
 class EvaluationResultReviewItem(BaseModel):
