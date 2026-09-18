@@ -157,6 +157,7 @@ class EvaluationRunner:
                     id=run_id,
                     dataset_id=db_dataset.id,
                     dataset_version_id=db_version.id,
+                    project_id=db_dataset.project_id,
                     model_name=getattr(self.provider, "model_name", "unknown-model"),
                     status=RunStatus.QUEUED.value,
                     is_simulated=self._is_simulated(),
@@ -188,6 +189,7 @@ class EvaluationRunner:
                 db_run = EvaluationRunDB(
                     id=run_id,
                     dataset_id=db_dataset.id,
+                    project_id=db_dataset.project_id,
                     model_name=getattr(self.provider, "model_name", "unknown-model"),
                     status=RunStatus.QUEUED.value,
                     is_simulated=self._is_simulated(),

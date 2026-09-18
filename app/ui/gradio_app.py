@@ -60,6 +60,7 @@ async def get_run_status(run_id):
             if error:
                 status = f"{status} — {error}"
             configuration = {
+                "project_id": data.get("project_id"),
                 "configuration_verified": data.get("configuration_verified", False),
                 "configuration": data.get("run_configuration"),
             }
@@ -138,7 +139,12 @@ async def dataset_choice_update():
             response.raise_for_status()
         datasets = response.json()["datasets"]
         choices = [
-            (f"{dataset['name']} (latest v{dataset['latest_version_number']})", dataset["id"])
+            (
+                f"{dataset.get('client_name') or 'Unassigned'} / "
+                f"{dataset.get('project_name') or 'No project'} — "
+                f"{dataset['name']} (latest v{dataset['latest_version_number']})",
+                dataset["id"],
+            )
             for dataset in datasets
         ]
         return gr.update(choices=choices, value=None)
@@ -149,6 +155,41 @@ async def dataset_choice_update():
 async def all_dataset_choice_updates():
     update = await dataset_choice_update()
     return update, update, update
+
+
+async def project_choice_update():
+    """Return agency project choices for dataset creation."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(f"{API_BASE}/projects")
+            response.raise_for_status()
+        choices = [
+            (f"{project['client_name']} / {project['name']}", project["id"])
+            for project in response.json()["projects"]
+        ]
+        return gr.update(choices=choices, value=None)
+    except Exception:
+        return gr.update(choices=[], value=None)
+
+
+async def create_project(name, client_name, description, tags):
+    if not name or not name.strip() or not client_name or not client_name.strip():
+        return {"error": "Enter both a project name and client name."}
+    payload = {
+        "name": name.strip(),
+        "client_name": client_name.strip(),
+        "description": description.strip() if description and description.strip() else None,
+        "tags": [tag.strip() for tag in tags.split(",") if tag.strip()] if tags else [],
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(f"{API_BASE}/projects", json=payload)
+            response.raise_for_status()
+        return {"message": "Project created.", "project": response.json()}
+    except httpx.HTTPStatusError as error:
+        return {"error": f"HTTP {error.response.status_code}: {error.response.text}"}
+    except Exception as error:
+        return {"error": str(error)}
 
 
 async def refresh_version_choices(dataset_id):
@@ -173,7 +214,7 @@ async def refresh_version_choices(dataset_id):
         return gr.update(choices=[], value=None)
 
 
-async def upload_dataset(file_path, name, description, tags):
+async def upload_dataset(file_path, name, description, tags, project_id):
     if not file_path:
         return {"error": "Choose a UTF-8 .jsonl file to upload."}
     path = Path(file_path)
@@ -183,7 +224,12 @@ async def upload_dataset(file_path, name, description, tags):
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
                 f"{API_BASE}/datasets/upload",
-                data={"name": dataset_name, "description": description or "", "tags": tags or ""},
+                data={
+                    "name": dataset_name,
+                    "description": description or "",
+                    "tags": tags or "",
+                    "project_id": project_id or "",
+                },
                 files={"file": (path.name, file_content, "application/jsonl")},
             )
             response.raise_for_status()
@@ -253,6 +299,7 @@ async def get_pairwise_status(run_id):
             metrics = data.get("metrics")
             comparisons = data.get("comparisons")
             configuration = {
+                "project_id": data.get("project_id"),
                 "configuration_verified": data.get("configuration_verified", False),
                 "configuration": data.get("run_configuration"),
             }
@@ -299,8 +346,20 @@ async def get_pairwise_status(run_id):
 with gr.Blocks(title="LLM Evaluation Engine") as demo:
     gr.Markdown("# LLM Evaluation Engine")
 
+    with gr.Tab("Projects"):
+        gr.Markdown("Create a workspace for each client product before uploading its evaluation datasets.")
+        with gr.Row():
+            with gr.Column():
+                project_name = gr.Textbox(label="Project / Product Name")
+                project_client_name = gr.Textbox(label="Client Name")
+                project_description = gr.Textbox(label="Description (optional)", lines=3)
+                project_tags = gr.Textbox(label="Tags (optional, comma-separated)")
+                create_project_button = gr.Button("Create Project", variant="primary")
+            with gr.Column():
+                project_output = gr.JSON(label="Project Result")
+
     with gr.Tab("Datasets"):
-        gr.Markdown("Upload and version JSONL datasets. Runs always use a stored immutable version.")
+        gr.Markdown("Upload and version JSONL datasets. Assign each dataset to a client project; runs inherit that project.")
         with gr.Row():
             with gr.Column():
                 gr.Markdown("### Upload a new dataset")
@@ -308,6 +367,7 @@ with gr.Blocks(title="LLM Evaluation Engine") as demo:
                 upload_name = gr.Textbox(label="Dataset Name (optional)")
                 upload_description = gr.Textbox(label="Description (optional)")
                 upload_tags = gr.Textbox(label="Tags (optional, comma-separated)")
+                upload_project = gr.Dropdown(label="Client Project (optional)", choices=[])
                 upload_button = gr.Button("Upload Dataset", variant="primary")
                 upload_output = gr.JSON(label="Upload Result")
             with gr.Column():
@@ -323,7 +383,7 @@ with gr.Blocks(title="LLM Evaluation Engine") as demo:
 
         upload_button.click(
             fn=upload_dataset,
-            inputs=[upload_file, upload_name, upload_description, upload_tags],
+            inputs=[upload_file, upload_name, upload_description, upload_tags, upload_project],
             outputs=upload_output,
         ).then(
             fn=dataset_choice_update,
@@ -345,6 +405,12 @@ with gr.Blocks(title="LLM Evaluation Engine") as demo:
             inputs=[manage_dataset, manage_version],
             outputs=version_output,
         ).then(fn=refresh_version_choices, inputs=manage_dataset, outputs=manage_version)
+
+    create_project_button.click(
+        fn=create_project,
+        inputs=[project_name, project_client_name, project_description, project_tags],
+        outputs=project_output,
+    ).then(fn=project_choice_update, outputs=upload_project)
 
     with gr.Tab("Run Evaluation"):
         gr.Markdown("Choose a stored dataset version and configure a new evaluation run.")
@@ -465,6 +531,7 @@ with gr.Blocks(title="LLM Evaluation Engine") as demo:
         fn=all_dataset_choice_updates,
         outputs=[manage_dataset, dataset_id, pw_dataset_id],
     )
+    demo.load(fn=project_choice_update, outputs=upload_project)
 
     with gr.Tab("Pairwise Results"):
         gr.Markdown("Look up a pairwise evaluation run by its ID.")

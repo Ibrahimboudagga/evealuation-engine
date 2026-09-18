@@ -156,6 +156,7 @@ class PairwiseEvaluationRunner:
                     id=run_id,
                     dataset_id=db_dataset.id,
                     dataset_version_id=db_version.id,
+                    project_id=db_dataset.project_id,
                     model_a_name=getattr(self.provider_a, "model_name", "unknown-model-a"),
                     model_b_name=getattr(self.provider_b, "model_name", "unknown-model-b"),
                     status=RunStatus.QUEUED.value,
@@ -189,6 +190,7 @@ class PairwiseEvaluationRunner:
                 db_run = PairwiseRunDB(
                     id=run_id,
                     dataset_id=db_dataset.id,
+                    project_id=db_dataset.project_id,
                     model_a_name=getattr(self.provider_a, "model_name", "unknown-model-a"),
                     model_b_name=getattr(self.provider_b, "model_name", "unknown-model-b"),
                     status=RunStatus.QUEUED.value,
