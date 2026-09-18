@@ -67,7 +67,7 @@ The project supports both real LLM providers and mock provider execution, making
 
 ### Web UI
 
-- **Gradio**: Interactive web interface with seven tabs for project setup, evaluation runs, detailed result review, pairwise comparisons, and results.
+- **Gradio**: Interactive web interface with eight tabs for project setup, evaluation runs, detailed result review, client reports, pairwise comparisons, and results.
 
 ### Evaluation and ML Libraries
 
@@ -939,6 +939,10 @@ Get run status and metrics.
 
 Returns persisted single-model evaluator results for UI review. Optional filters are `evaluator`, `score_min`, `score_max`, and repeatable `outcome` values. Each result includes prompt, prediction, expected output, judge explanation when present in evaluator metadata, and a sanitized error message.
 
+#### `GET /runs/{run_id}/export`
+
+Downloads a client-ready run report. Use `format=json` for the full transparent report, `format=csv` for evaluator-result rows, or `format=html` for a print-ready summary that includes configuration, coverage and quality metrics, failure counts, and example-level failures.
+
 #### `GET /runs`
 
 List all tracked runs.
@@ -1026,7 +1030,7 @@ A standalone Gradio application that communicates with the FastAPI layer via `ht
 
 ### Layout
 
-Uses `gr.Blocks()` with seven tabs:
+Uses `gr.Blocks()` with eight tabs:
 
 **Tab 1 -- Projects**
 
@@ -1067,7 +1071,11 @@ On submit: GET `http://localhost:8000/runs/{run_id}`, display:
 
 Users filter persisted per-example results by evaluator, score range, and `evaluated`, `generation_error`, or `evaluation_error` outcomes. The detail selector displays the prompt, output, expected answer, judge explanation, and sanitized error without database access.
 
-**Tab 6 -- Pairwise Evaluation**
+**Tab 6 -- Client Reports**
+
+Users download a CSV, JSON, or print-ready HTML summary from a single-model run. HTML reports include run configuration, coverage and quality metrics, failure counts, and example-level failures with redacted errors.
+
+**Tab 7 -- Pairwise Evaluation**
 
 | Input | Type | Default |
 |---|---|---|
@@ -1088,7 +1096,7 @@ Users filter persisted per-example results by evaluator, score range, and `evalu
 
 On submit: POST to `http://localhost:8000/pairwise-runs`, display the returned `run_id` and status.
 
-**Tab 7 -- Pairwise Results**
+**Tab 8 -- Pairwise Results**
 
 | Input | Type |
 |---|---|
@@ -1512,7 +1520,7 @@ This project is a modular LLM evaluation framework built around simple but stron
 - **Settings** centralize environment-based configuration.
 - **Metrics reporting** includes both average scores and pass rates for single-model runs, and win rates, Elo ratings, and average scores for pairwise runs.
 - **The REST API** (FastAPI) exposes the pipeline for programmatic access with automatic OpenAPI documentation.
-- **The Gradio UI** provides an interactive web interface with seven tabs for non-technical users.
+- **The Gradio UI** provides an interactive web interface with eight tabs for non-technical users.
 - **Structured logging** (structlog) provides production-ready observability across all modules.
 
 The architecture is intentionally modular and extensible, making it suitable for experimentation, local evaluation workflows, team-based API access, and future growth into a richer evaluation platform.

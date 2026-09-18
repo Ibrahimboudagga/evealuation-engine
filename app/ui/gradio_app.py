@@ -1,5 +1,6 @@
 import gradio as gr
 import httpx
+import tempfile
 from pathlib import Path
 
 API_BASE = "http://localhost:8000"
@@ -167,6 +168,29 @@ def show_review_result(result_id, results):
     if not result_id:
         return None
     return next((item for item in results or [] if str(item["id"]) == str(result_id)), None)
+
+
+async def export_run_report(run_id, report_format):
+    """Download a client-ready report from the API into Gradio's file output."""
+    if not run_id or not run_id.strip():
+        return "Enter a Run ID before exporting.", None
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.get(
+                f"{API_BASE}/runs/{run_id.strip()}/export",
+                params={"format": report_format},
+            )
+            response.raise_for_status()
+        with tempfile.NamedTemporaryFile(
+            mode="wb", suffix=f".{report_format}", prefix="evaluation-report-", delete=False
+        ) as report_file:
+            report_file.write(response.content)
+            report_path = report_file.name
+        return f"{report_format.upper()} report is ready to download.", report_path
+    except httpx.HTTPStatusError as error:
+        return f"HTTP {error.response.status_code}: {error.response.text}", None
+    except Exception as error:
+        return f"Error: {error}", None
 
 
 async def submit_pairwise_run(
@@ -594,6 +618,20 @@ with gr.Blocks(title="LLM Evaluation Engine") as demo:
             ],
         )
         review_selector.change(fn=show_review_result, inputs=[review_selector, review_state], outputs=review_detail)
+
+    with gr.Tab("Client Reports"):
+        gr.Markdown("Export a transparent run summary to share with a client. HTML is formatted for browser review or printing.")
+        with gr.Row():
+            report_run_id = gr.Textbox(label="Run ID")
+            report_format = gr.Dropdown(label="Export Format", choices=["html", "json", "csv"], value="html")
+            report_button = gr.Button("Export Report", variant="primary")
+        report_export_status = gr.Markdown()
+        report_download = gr.File(label="Client-ready Report")
+        report_button.click(
+            fn=export_run_report,
+            inputs=[report_run_id, report_format],
+            outputs=[report_export_status, report_download],
+        )
 
     # ── Pairwise Evaluation Tab ──────────────────────────────
 

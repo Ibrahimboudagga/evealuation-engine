@@ -1,8 +1,9 @@
 import asyncio
 import structlog
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query
+from fastapi.responses import Response
 
 from app.api.schemas import (
     RunRequest,
@@ -48,6 +49,7 @@ from app.runners.pairwise_runner import (
 )
 from app.services.dataset_service import DatasetService
 from app.services.project_service import ProjectService
+from app.services.report_service import ReportService
 from app.services.run_recovery import reconcile_abandoned_runs
 from app.schemas.outcomes import EvaluationOutcome, RunStatus
 
@@ -59,6 +61,7 @@ _single_execution_worker = asyncio.Lock()
 # Service singleton
 _dataset_service = DatasetService()
 _project_service = ProjectService()
+_report_service = ReportService()
 
 
 def _dataset_to_response(dataset: DatasetDB) -> DatasetResponse:
@@ -356,6 +359,35 @@ async def list_run_results(
         filtered_count=len(results),
         available_evaluators=available_evaluators,
         results=results,
+    )
+
+
+@app.get("/runs/{run_id}/export")
+async def export_run_report(
+    run_id: str,
+    report_format: Literal["json", "csv", "html"] = Query(default="json", alias="format"),
+):
+    """Download a client-ready JSON, CSV, or HTML evaluation report."""
+    try:
+        report = await asyncio.to_thread(_report_service.build_run_report, run_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error))
+
+    if report_format == "csv":
+        content = _report_service.to_csv(report)
+        media_type = "text/csv"
+    elif report_format == "html":
+        content = _report_service.to_html(report)
+        media_type = "text/html"
+    else:
+        content = _report_service.to_json(report)
+        media_type = "application/json"
+
+    filename = _report_service.filename(run_id, report_format)
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
