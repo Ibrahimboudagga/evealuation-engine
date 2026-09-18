@@ -15,7 +15,9 @@ A modular evaluation engine for comparing LLM providers on structured datasets. 
 - **SQLite persistence**: Datasets (with versions), runs, pairwise runs, and per-example results stored in `evals.db`.
 - **REST API**: FastAPI layer for triggering runs, checking status, managing datasets, and listing results.
 - **Client-ready exports**: Download transparent CSV, JSON, or print-ready HTML summaries with configuration, coverage, quality, and failures.
-- **Web UI**: Gradio interface with eight tabs for project setup, evaluation, detailed result review, client reports, pairwise comparison, and result browsing.
+- **Release checks**: Mark completed baselines and label compatible completed runs as passed, regressed, or inconclusive.
+- **Agency demo**: Seed mock-only client data and demonstrate upload, run, review, export, and release checks without credentials.
+- **Web UI**: Gradio interface with nine tabs for project setup, evaluation, detailed result review, client reports, release checks, pairwise comparison, and result browsing.
 - **Pydantic v2**: Typed schemas for settings, examples, results, and API request/response models.
 
 ## Project Structure
@@ -55,7 +57,7 @@ app/
     main.py              # FastAPI app (projects, runs, pairwise-runs, datasets endpoints)
     schemas.py           # Pydantic v2 request/response models
   ui/
-    gradio_app.py        # Gradio Blocks UI with 8 tabs (talks to FastAPI via httpx)
+    gradio_app.py        # Gradio Blocks UI with 9 tabs (talks to FastAPI via httpx)
 datasets/
   sample.jsonl           # Sample 5-example evaluation dataset
 tests/
@@ -72,6 +74,7 @@ requirements.txt
 .env.example
 README.md
 PROJECT_DOCUMENTATION.md
+DEMO_GUIDE.md
 feature-pairwise_model_evaluation.md
 ```
 
@@ -258,6 +261,18 @@ Review persisted per-example evaluator results. Filter with `evaluator`, `score_
 #### `GET /runs/{run_id}/export`
 
 Download a transparent report with `format=json`, `format=csv`, or `format=html`. JSON contains the full persisted results, CSV contains one row per evaluator result, and HTML is a client-ready summary with the run configuration, coverage and quality metrics, failure counts, and example-level failures.
+
+#### `PUT /runs/{run_id}/baseline`
+
+Mark a completed run as a release baseline. Baselines remain queryable with `GET /runs?baseline_only=true`.
+
+#### `GET /runs/{run_id}/comparison`
+
+Compare a completed run with a marked baseline from the same project. Query parameters include `baseline_run_id`, `coverage_minimum` (default `0.95`), and `exact_match_pass_rate_max_drop` (default `0.05`). The response labels the result `passed`, `regressed`, or `inconclusive`, and returns per-evaluator score, pass-rate, coverage, and error-count deltas.
+
+#### `POST /demo/seed`
+
+Idempotently creates the mock-only `Northstar Demo Client / Customer Support Copilot` project and two small sample datasets. Follow [DEMO_GUIDE.md](DEMO_GUIDE.md) for the full no-credentials walkthrough.
 
 #### `GET /runs`
 
@@ -484,7 +499,7 @@ Delete a dataset and all its versions.
 
 ## Gradio Web UI
 
-The Gradio interface provides eight tabs:
+The Gradio interface provides nine tabs:
 
 ### Tab 1 -- Projects
 
@@ -525,7 +540,11 @@ Load a single-model run and filter by evaluator, score range, or result outcomes
 
 Download a CSV, JSON, or print-ready HTML evaluation report to share with the client. Reports show stored configuration, coverage and quality metrics, failure counts, and example-level failures with sanitized errors.
 
-### Tab 7 -- Pairwise Evaluation
+### Tab 7 -- Release Checks
+
+Mark a completed run as a baseline and compare a later completed run against it. The page clearly labels the configured coverage and exact-match pass-rate rules as **PASSED**, **REGRESSED**, or **INCONCLUSIVE**.
+
+### Tab 8 -- Pairwise Evaluation
 
 Compare two models side-by-side on the same dataset.
 
@@ -536,7 +555,7 @@ Inputs:
 - Judge: Provider, Model, API Key
 - Concurrency (slider, 1-20)
 
-### Tab 8 -- Pairwise Results
+### Tab 9 -- Pairwise Results
 
 Enter a Pairwise Run ID and click **Fetch Results**. Displays:
 - Run status with model names, simulation label, and any sanitized error

@@ -1,0 +1,3 @@
+{"id":"retrieval-1","input":"What is the return period?","expected_output":"The return period is 30 days."}
+{"id":"retrieval-2","input":"Does the plan include analytics?","expected_output":"Analytics are included on the Pro plan."}
+{"id":"retrieval-3","input":"Can users be invited to a workspace?","expected_output":"Workspace admins can invite users by email."}

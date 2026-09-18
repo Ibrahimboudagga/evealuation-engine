@@ -38,7 +38,10 @@ async def submit_run(
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(f"{API_BASE}/runs", json=payload)
             resp.raise_for_status()
-            return resp.json()
+            data = resp.json()
+            if data.get("is_simulated"):
+                data["notice"] = "SIMULATED RUN: mock or demo provider output was used."
+            return data
     except httpx.HTTPStatusError as e:
         return {"error": f"HTTP {e.response.status_code}: {e.response.text}"}
     except Exception as e:
@@ -193,6 +196,67 @@ async def export_run_report(run_id, report_format):
         return f"Error: {error}", None
 
 
+async def seed_agency_demo():
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(f"{API_BASE}/demo/seed")
+            response.raise_for_status()
+        return response.json()
+    except httpx.HTTPStatusError as error:
+        return {"error": f"HTTP {error.response.status_code}: {error.response.text}"}
+    except Exception as error:
+        return {"error": str(error)}
+
+
+async def baseline_choice_update():
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(f"{API_BASE}/runs", params={"baseline_only": True})
+            response.raise_for_status()
+        choices = [
+            (f"{run['run_id']} ({run['status']})", run["run_id"])
+            for run in response.json()["runs"]
+        ]
+        return gr.update(choices=choices, value=None)
+    except Exception:
+        return gr.update(choices=[], value=None)
+
+
+async def mark_run_as_baseline(run_id):
+    if not run_id or not run_id.strip():
+        return {"error": "Enter the completed Run ID to mark as a baseline."}
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.put(f"{API_BASE}/runs/{run_id.strip()}/baseline")
+            response.raise_for_status()
+        return response.json()
+    except httpx.HTTPStatusError as error:
+        return {"error": f"HTTP {error.response.status_code}: {error.response.text}"}
+    except Exception as error:
+        return {"error": str(error)}
+
+
+async def compare_run_with_baseline(run_id, baseline_run_id, coverage_minimum, max_pass_rate_drop):
+    if not run_id or not run_id.strip() or not baseline_run_id:
+        return "Enter a current Run ID and select a baseline.", None
+    params = {
+        "baseline_run_id": baseline_run_id,
+        "coverage_minimum": coverage_minimum,
+        "exact_match_pass_rate_max_drop": max_pass_rate_drop,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(f"{API_BASE}/runs/{run_id.strip()}/comparison", params=params)
+            response.raise_for_status()
+        data = response.json()
+        reasons = " ".join(data.get("reasons", []))
+        return f"### Release check: **{data['status'].upper()}**\n\n{reasons}", data
+    except httpx.HTTPStatusError as error:
+        return f"### Release check: **INCONCLUSIVE**\n\nHTTP {error.response.status_code}: {error.response.text}", None
+    except Exception as error:
+        return f"### Release check: **INCONCLUSIVE**\n\n{error}", None
+
+
 async def submit_pairwise_run(
     dataset_id,
     dataset_version_id,
@@ -231,7 +295,10 @@ async def submit_pairwise_run(
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(f"{API_BASE}/pairwise-runs", json=payload)
             resp.raise_for_status()
-            return resp.json()
+            data = resp.json()
+            if data.get("is_simulated"):
+                data["notice"] = "SIMULATED RUN: mock or demo provider output was used."
+            return data
     except httpx.HTTPStatusError as e:
         return {"error": f"HTTP {e.response.status_code}: {e.response.text}"}
     except Exception as e:
@@ -454,7 +521,7 @@ with gr.Blocks(title="LLM Evaluation Engine") as demo:
     gr.Markdown("# LLM Evaluation Engine")
 
     with gr.Tab("Projects"):
-        gr.Markdown("Create a workspace for each client product before uploading its evaluation datasets.")
+        gr.Markdown("Create a workspace for each client product before uploading its evaluation datasets. Seed the mock-only demo to start a credential-free walkthrough.")
         with gr.Row():
             with gr.Column():
                 project_name = gr.Textbox(label="Project / Product Name")
@@ -462,8 +529,10 @@ with gr.Blocks(title="LLM Evaluation Engine") as demo:
                 project_description = gr.Textbox(label="Description (optional)", lines=3)
                 project_tags = gr.Textbox(label="Tags (optional, comma-separated)")
                 create_project_button = gr.Button("Create Project", variant="primary")
+                seed_demo_button = gr.Button("Seed Agency Demo")
             with gr.Column():
                 project_output = gr.JSON(label="Project Result")
+                demo_seed_output = gr.JSON(label="Demo Setup")
 
     with gr.Tab("Datasets"):
         gr.Markdown("Upload and version JSONL datasets. Assign each dataset to a client project; runs inherit that project.")
@@ -518,6 +587,9 @@ with gr.Blocks(title="LLM Evaluation Engine") as demo:
         inputs=[project_name, project_client_name, project_description, project_tags],
         outputs=project_output,
     ).then(fn=project_choice_update, outputs=upload_project)
+    seed_demo_button.click(fn=seed_agency_demo, outputs=demo_seed_output).then(
+        fn=project_choice_update, outputs=upload_project
+    ).then(fn=dataset_choice_update, outputs=manage_dataset)
 
     with gr.Tab("Run Evaluation"):
         gr.Markdown("Choose a stored dataset version and configure a new evaluation run.")
@@ -631,6 +703,35 @@ with gr.Blocks(title="LLM Evaluation Engine") as demo:
             fn=export_run_report,
             inputs=[report_run_id, report_format],
             outputs=[report_export_status, report_download],
+        )
+
+    with gr.Tab("Release Checks"):
+        gr.Markdown("Mark a completed run as the baseline, then compare a later completed run against the configured release rules.")
+        with gr.Row():
+            baseline_mark_run_id = gr.Textbox(label="Completed Run ID to Mark as Baseline")
+            baseline_mark_button = gr.Button("Mark Baseline")
+            baseline_mark_output = gr.JSON(label="Baseline Result")
+        with gr.Row():
+            release_run_id = gr.Textbox(label="Current Completed Run ID")
+            release_baseline_id = gr.Dropdown(label="Baseline Run", choices=[])
+            refresh_baselines_button = gr.Button("Refresh Baselines")
+        with gr.Row():
+            release_coverage_minimum = gr.Number(label="Minimum Coverage", value=0.95, minimum=0, maximum=1, precision=3)
+            release_pass_rate_drop = gr.Number(label="Maximum Exact-Match Pass-Rate Drop", value=0.05, minimum=0, maximum=1, precision=3)
+            release_check_button = gr.Button("Run Release Check", variant="primary")
+        release_check_summary = gr.Markdown("Choose a baseline and current run to evaluate the release rules.")
+        release_check_detail = gr.JSON(label="Evaluator Comparison")
+
+        baseline_mark_button.click(
+            fn=mark_run_as_baseline,
+            inputs=baseline_mark_run_id,
+            outputs=baseline_mark_output,
+        ).then(fn=baseline_choice_update, outputs=release_baseline_id)
+        refresh_baselines_button.click(fn=baseline_choice_update, outputs=release_baseline_id)
+        release_check_button.click(
+            fn=compare_run_with_baseline,
+            inputs=[release_run_id, release_baseline_id, release_coverage_minimum, release_pass_rate_drop],
+            outputs=[release_check_summary, release_check_detail],
         )
 
     # ── Pairwise Evaluation Tab ──────────────────────────────

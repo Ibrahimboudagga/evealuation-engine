@@ -11,6 +11,9 @@ from app.api.schemas import (
     RunStatusResponse,
     RunListItem,
     RunsListResponse,
+    BaselineMarkResponse,
+    RunComparisonResponse,
+    DemoSeedResponse,
     EvaluationResultReviewItem,
     RunResultsResponse,
     EvaluatorMetric,
@@ -48,6 +51,8 @@ from app.runners.pairwise_runner import (
     get_pairwise_comparisons,
 )
 from app.services.dataset_service import DatasetService
+from app.services.baseline_service import BaselineService
+from app.services.demo_seed import DemoSeedService
 from app.services.project_service import ProjectService
 from app.services.report_service import ReportService
 from app.services.run_recovery import reconcile_abandoned_runs
@@ -62,6 +67,8 @@ _single_execution_worker = asyncio.Lock()
 _dataset_service = DatasetService()
 _project_service = ProjectService()
 _report_service = ReportService()
+_baseline_service = BaselineService()
+_demo_seed_service = DemoSeedService()
 
 
 def _dataset_to_response(dataset: DatasetDB) -> DatasetResponse:
@@ -139,6 +146,12 @@ def startup():
     recovered = reconcile_abandoned_runs()
     if recovered["evaluation_runs"] or recovered["pairwise_runs"]:
         log.info("abandoned_runs_reconciled", **recovered)
+
+
+@app.post("/demo/seed", response_model=DemoSeedResponse)
+async def seed_agency_demo():
+    """Create an idempotent mock-only demo workspace with sample datasets."""
+    return DemoSeedResponse(**(await asyncio.to_thread(_demo_seed_service.seed)))
 
 
 # ── Existing Run Endpoints ───────────────────────────────────
@@ -245,6 +258,7 @@ async def get_run(run_id: str):
         run_configuration = run.run_configuration
         configuration_verified = run.configuration_verified
         project_id = run.project_id
+        is_baseline = run.is_baseline
 
     evaluator_metrics = None
     if status in {RunStatus.RUNNING, RunStatus.COMPLETED, RunStatus.INTERRUPTED}:
@@ -277,13 +291,17 @@ async def get_run(run_id: str):
         run_configuration=run_configuration,
         configuration_verified=configuration_verified,
         project_id=project_id,
+        is_baseline=is_baseline,
     )
 
 
 @app.get("/runs", response_model=RunsListResponse)
-async def list_runs():
+async def list_runs(baseline_only: bool = Query(default=False, description="List only marked baselines")):
     with get_db() as db:
-        db_runs = db.query(EvaluationRunDB).order_by(EvaluationRunDB.created_at.desc()).all()
+        query = db.query(EvaluationRunDB)
+        if baseline_only:
+            query = query.filter(EvaluationRunDB.is_baseline == True)
+        db_runs = query.order_by(EvaluationRunDB.created_at.desc()).all()
         runs = [
             RunListItem(
                 run_id=db_run.id,
@@ -291,11 +309,41 @@ async def list_runs():
                 created_at=db_run.created_at,
                 is_simulated=db_run.is_simulated,
                 project_id=db_run.project_id,
+                is_baseline=db_run.is_baseline,
             )
             for db_run in db_runs
         ]
 
     return RunsListResponse(runs=runs)
+
+
+@app.put("/runs/{run_id}/baseline", response_model=BaselineMarkResponse)
+async def mark_run_as_baseline(run_id: str):
+    try:
+        run = await asyncio.to_thread(_baseline_service.mark_baseline, run_id)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    return BaselineMarkResponse(run_id=run.id, is_baseline=run.is_baseline, status=RunStatus(run.status))
+
+
+@app.get("/runs/{run_id}/comparison", response_model=RunComparisonResponse)
+async def compare_run_to_baseline(
+    run_id: str,
+    baseline_run_id: str = Query(..., description="Completed run previously marked as a baseline"),
+    coverage_minimum: float = Query(default=0.95, ge=0.0, le=1.0),
+    exact_match_pass_rate_max_drop: float = Query(default=0.05, ge=0.0, le=1.0),
+):
+    try:
+        comparison = await asyncio.to_thread(
+            _baseline_service.compare,
+            run_id,
+            baseline_run_id,
+            coverage_minimum,
+            exact_match_pass_rate_max_drop,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    return RunComparisonResponse(**comparison)
 
 
 @app.get("/runs/{run_id}/results", response_model=RunResultsResponse)

@@ -109,6 +109,7 @@ class EvaluationRunDB(Base):
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     is_simulated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_baseline: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     run_configuration_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     configuration_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
