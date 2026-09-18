@@ -77,6 +77,7 @@ def dataset_version_snapshot(dataset: Any, version: Any) -> dict[str, Any]:
         "source": "dataset_registry",
         "dataset_id": dataset.id,
         "dataset_name": dataset.name,
+        "project_id": dataset.project_id,
         "version_id": version.id,
         "version_number": version.version_number,
         "example_count": version.example_count,

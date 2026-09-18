@@ -9,7 +9,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session, selectinload
 
 from app.database.connection import get_db
-from app.database.models import DatasetDB, DatasetVersionDB
+from app.database.models import DatasetDB, DatasetVersionDB, ProjectDB
 from app.schemas.example import EvaluationExample
 
 log = structlog.get_logger()
@@ -22,21 +22,24 @@ class DatasetService:
         self,
         tag: Optional[str] = None,
         search: Optional[str] = None,
+        project_id: Optional[str] = None,
     ) -> List[DatasetDB]:
         """List all datasets with optional tag filter and name search."""
         with get_db() as db:
-            query = db.query(DatasetDB).options(selectinload(DatasetDB.versions))
+            query = db.query(DatasetDB).options(selectinload(DatasetDB.versions), selectinload(DatasetDB.project))
             if tag:
                 query = query.filter(DatasetDB.tags_json.contains(f'"{tag}"'))
             if search:
                 query = query.filter(DatasetDB.name.ilike(f"%{search}%"))
+            if project_id:
+                query = query.filter(DatasetDB.project_id == project_id)
             return query.order_by(DatasetDB.created_at.desc()).all()
 
     def get_dataset(self, dataset_id: str) -> Optional[DatasetDB]:
         """Get a single dataset by ID with its versions loaded."""
         with get_db() as db:
             return db.query(DatasetDB).options(
-                selectinload(DatasetDB.versions)
+                selectinload(DatasetDB.versions), selectinload(DatasetDB.project)
             ).filter(DatasetDB.id == dataset_id).first()
 
     def create_dataset(
@@ -45,6 +48,7 @@ class DatasetService:
         content_jsonl: str,
         description: Optional[str] = None,
         tags: Optional[List[str]] = None,
+        project_id: Optional[str] = None,
     ) -> DatasetDB:
         """
         Create a new dataset with its first version.
@@ -70,10 +74,13 @@ class DatasetService:
         now = datetime.now(timezone.utc)
 
         with get_db() as db:
+            if project_id and not db.query(ProjectDB).filter(ProjectDB.id == project_id).first():
+                raise ValueError(f"Project '{project_id}' not found.")
             dataset = DatasetDB(
                 id=dataset_id,
                 name=name,
                 description=description,
+                project_id=project_id,
                 latest_version_number=1,
                 created_at=now,
                 updated_at=now,
@@ -106,6 +113,7 @@ class DatasetService:
         filename: str,
         description: Optional[str] = None,
         tags: Optional[List[str]] = None,
+        project_id: Optional[str] = None,
     ) -> DatasetDB:
         """
         Create a dataset from an uploaded file.
@@ -136,6 +144,7 @@ class DatasetService:
             content_jsonl=content_str,
             description=description,
             tags=tags,
+            project_id=project_id,
         )
 
     def add_version(

@@ -11,6 +11,35 @@ class Base(DeclarativeBase):
     pass
 
 
+class ProjectDB(Base):
+    __tablename__ = "projects"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    client_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    tags_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    datasets: Mapped[list["DatasetDB"]] = relationship(back_populates="project")
+    evaluation_runs: Mapped[list["EvaluationRunDB"]] = relationship(back_populates="project")
+    pairwise_runs: Mapped[list["PairwiseRunDB"]] = relationship(back_populates="project")
+
+    @property
+    def tags(self) -> List[str]:
+        if not self.tags_json:
+            return []
+        try:
+            return json.loads(self.tags_json)
+        except json.JSONDecodeError:
+            return []
+
+    @tags.setter
+    def tags(self, val: List[str]) -> None:
+        self.tags_json = json.dumps(val) if val else None
+
+
 class DatasetDB(Base):
     __tablename__ = "datasets"
 
@@ -18,6 +47,7 @@ class DatasetDB(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     tags_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    project_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("projects.id"), nullable=True)
     latest_version_number: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
@@ -26,6 +56,7 @@ class DatasetDB(Base):
         back_populates="dataset", cascade="all, delete-orphan", order_by="DatasetVersionDB.version_number"
     )
     runs: Mapped[list["EvaluationRunDB"]] = relationship(back_populates="dataset", cascade="all, delete-orphan")
+    project: Mapped[Optional[ProjectDB]] = relationship(back_populates="datasets")
 
     @property
     def tags(self) -> List[str]:
@@ -70,6 +101,7 @@ class EvaluationRunDB(Base):
     id: Mapped[str] = mapped_column(String(255), primary_key=True)
     dataset_id: Mapped[str] = mapped_column(String(255), ForeignKey("datasets.id"), nullable=False)
     dataset_version_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("dataset_versions.id"), nullable=True)
+    project_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("projects.id"), nullable=True)
     model_name: Mapped[str] = mapped_column(String(255), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     status: Mapped[str] = mapped_column(String(20), default=RunStatus.QUEUED.value, nullable=False)
@@ -81,6 +113,7 @@ class EvaluationRunDB(Base):
     configuration_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     dataset: Mapped[DatasetDB] = relationship(back_populates="runs")
+    project: Mapped[Optional[ProjectDB]] = relationship(back_populates="evaluation_runs")
     results: Mapped[list["EvaluationResultDB"]] = relationship(back_populates="run", cascade="all, delete-orphan")
 
     @property
@@ -136,6 +169,7 @@ class PairwiseRunDB(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     dataset_id: Mapped[str] = mapped_column(String(36), ForeignKey("datasets.id"), nullable=False)
     dataset_version_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("dataset_versions.id"), nullable=True)
+    project_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("projects.id"), nullable=True)
     model_a_name: Mapped[str] = mapped_column(String(255), nullable=False)
     model_b_name: Mapped[str] = mapped_column(String(255), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
@@ -148,6 +182,7 @@ class PairwiseRunDB(Base):
     configuration_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     dataset: Mapped[DatasetDB] = relationship()
+    project: Mapped[Optional[ProjectDB]] = relationship(back_populates="pairwise_runs")
     comparisons: Mapped[list["PairwiseComparisonDB"]] = relationship(back_populates="run", cascade="all, delete-orphan")
 
     @property

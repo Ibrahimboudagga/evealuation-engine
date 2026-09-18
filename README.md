@@ -9,11 +9,12 @@ A modular evaluation engine for comparing LLM providers on structured datasets. 
 - **Async evaluation**: Configurable concurrency via `asyncio` semaphore.
 - **Three evaluators**: Exact match, semantic similarity (sentence-transformers), and LLM-as-a-judge with custom prompt support.
 - **Pairwise evaluation**: Compare two models side-by-side with a judge model, including Elo ratings, win/loss/tie rates, and order randomization to eliminate bias.
-- **Dataset management**: Full CRUD API with versioning, file upload, tagging, and search.
+- **Agency projects**: Group datasets and both evaluation run types by client and product, with descriptions and tags.
+- **Dataset management**: Full CRUD API with versioning, file upload, tagging, project assignment, and search.
 - **Structured logging**: `structlog`-based logging throughout all modules.
 - **SQLite persistence**: Datasets (with versions), runs, pairwise runs, and per-example results stored in `evals.db`.
 - **REST API**: FastAPI layer for triggering runs, checking status, managing datasets, and listing results.
-- **Web UI**: Gradio interface with four tabs for interactive evaluation, pairwise comparison, and result browsing.
+- **Web UI**: Gradio interface with six tabs for project setup, evaluation, pairwise comparison, and result browsing.
 - **Pydantic v2**: Typed schemas for settings, examples, results, and API request/response models.
 
 ## Project Structure
@@ -24,7 +25,7 @@ app/
   database/
     connection.py        # SQLAlchemy engine, sessions, init_db()
     models.py            # DatasetDB, DatasetVersionDB, EvaluationRunDB,
-                         # EvaluationResultDB, PairwiseRunDB, PairwiseComparisonDB
+                         # EvaluationResultDB, PairwiseRunDB, PairwiseComparisonDB, ProjectDB
   evaluators/
     base.py              # BaseEvaluator abstract class
     base_pairwise.py     # BasePairwiseEvaluator abstract class
@@ -48,11 +49,12 @@ app/
     result.py            # EvaluationResult
   services/
     dataset_service.py   # DatasetService (CRUD, versioning, upload, search)
+    project_service.py   # ProjectService (client product workspaces)
   api/
-    main.py              # FastAPI app (runs, pairwise-runs, datasets endpoints)
+    main.py              # FastAPI app (projects, runs, pairwise-runs, datasets endpoints)
     schemas.py           # Pydantic v2 request/response models
   ui/
-    gradio_app.py        # Gradio Blocks UI with 4 tabs (talks to FastAPI via httpx)
+    gradio_app.py        # Gradio Blocks UI with 6 tabs (talks to FastAPI via httpx)
 datasets/
   sample.jsonl           # Sample 5-example evaluation dataset
 tests/
@@ -345,6 +347,16 @@ List all pairwise runs.
 
 ---
 
+### Project Endpoints
+
+Projects create an agency workspace for one client product. A project has a name, client name, optional description, and tags. Datasets assigned with `project_id` and runs started from those datasets keep the same project ID. Deleting a project preserves its historical datasets and runs by unassigning them.
+
+- `GET /projects` — list projects
+- `POST /projects` — create a project
+- `GET /projects/{project_id}` — retrieve a project
+- `PUT /projects/{project_id}` — update a project
+- `DELETE /projects/{project_id}` — unassign related records and delete the project
+
 ### Dataset Endpoints
 
 #### `GET /datasets`
@@ -354,6 +366,7 @@ List all datasets with optional filtering.
 **Query parameters:**
 - `tag` (string, optional) — filter by tag
 - `search` (string, optional) — search by name
+- `project_id` (string, optional) — filter by client project
 
 **Response (`200`):**
 
@@ -397,6 +410,7 @@ Create a new dataset from JSONL content.
   "name": "my-dataset",
   "description": "Test dataset",
   "tags": ["test"],
+  "project_id": "uuid-string",
   "content": "{\"input\": \"What is 2+2?\", \"expected_output\": \"4\"}\n{\"input\": \"Capital of France?\", \"expected_output\": \"Paris\"}"
 }
 ```
@@ -412,6 +426,7 @@ Upload a JSONL file as a dataset.
 - `name` — dataset name
 - `description` (optional) — description
 - `tags` (optional) — comma-separated tags
+- `project_id` (optional) — client project that owns the dataset
 
 **Response (`201`):** Dataset response object.
 
@@ -460,13 +475,17 @@ Delete a dataset and all its versions.
 
 ## Gradio Web UI
 
-The Gradio interface provides five tabs:
+The Gradio interface provides six tabs:
 
-### Tab 1 -- Datasets
+### Tab 1 -- Projects
 
-Upload a UTF-8 `.jsonl` file to create a dataset and active version. Select an existing dataset to upload a new immutable version or set a prior version active. JSONL is validated by the API before it is stored.
+Create a project for each client product, with a client name, description, and tags. Project choices appear when uploading a dataset.
 
-### Tab 2 -- Run Evaluation
+### Tab 2 -- Datasets
+
+Upload a UTF-8 `.jsonl` file to create a dataset and active version. Assign it to a client project, then select an existing dataset to upload a new immutable version or set a prior version active. JSONL is validated by the API before it is stored.
+
+### Tab 3 -- Run Evaluation
 
 Fill in all fields and click **Submit Run**. The UI sends a `POST` to the FastAPI server and displays the returned `run_id` and status.
 
@@ -481,7 +500,7 @@ Inputs:
 - Concurrency (slider, 1-20)
 - Judge Prompt Template (optional, multiline)
 
-### Tab 3 -- View Results
+### Tab 4 -- View Results
 
 Enter a Run ID and click **Fetch Results**. The UI queries the API and displays:
 - Lifecycle status, including `queued`, `running`, `completed`, `failed`, and `interrupted`
@@ -489,7 +508,7 @@ Enter a Run ID and click **Fetch Results**. The UI queries the API and displays:
 - Any sanitized run error
 - Metrics with valid-result counts, coverage, generation errors, and evaluation errors
 
-### Tab 4 -- Pairwise Evaluation
+### Tab 5 -- Pairwise Evaluation
 
 Compare two models side-by-side on the same dataset.
 
@@ -500,7 +519,7 @@ Inputs:
 - Judge: Provider, Model, API Key
 - Concurrency (slider, 1-20)
 
-### Tab 5 -- Pairwise Results
+### Tab 6 -- Pairwise Results
 
 Enter a Pairwise Run ID and click **Fetch Results**. Displays:
 - Run status with model names, simulation label, and any sanitized error

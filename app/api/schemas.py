@@ -68,6 +68,7 @@ class RunStatusResponse(BaseModel):
     is_simulated: bool = False
     run_configuration: Optional[Dict[str, Any]] = None
     configuration_verified: bool = False
+    project_id: Optional[str] = None
 
 
 class RunListItem(BaseModel):
@@ -76,6 +77,7 @@ class RunListItem(BaseModel):
     status: RunStatus
     created_at: Optional[datetime] = None
     is_simulated: bool = False
+    project_id: Optional[str] = None
 
 
 class RunsListResponse(BaseModel):
@@ -94,6 +96,39 @@ class DatasetVersionResponse(BaseModel):
     created_at: datetime = Field(..., description="Version creation timestamp")
 
 
+class ProjectCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255, description="Product or evaluation project name")
+    client_name: str = Field(..., min_length=1, max_length=255, description="Agency client name")
+    description: Optional[str] = Field(default=None, description="Project scope or notes")
+    tags: Optional[List[str]] = Field(default=None, description="Project tags")
+
+
+class ProjectUpdateRequest(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    client_name: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    description: Optional[str] = None
+    tags: Optional[List[str]] = None
+
+
+class ProjectResponse(BaseModel):
+    id: str
+    name: str
+    client_name: str
+    description: Optional[str] = None
+    tags: List[str] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProjectsListResponse(BaseModel):
+    projects: List[ProjectResponse]
+
+
+class ProjectDeleteResponse(BaseModel):
+    message: str
+    id: str
+
+
 class DatasetResponse(BaseModel):
     """Full dataset record."""
     id: str = Field(..., description="Dataset UUID")
@@ -103,6 +138,9 @@ class DatasetResponse(BaseModel):
     latest_version_number: int = Field(..., description="Latest version number")
     created_at: datetime = Field(..., description="Creation timestamp")
     updated_at: datetime = Field(..., description="Last update timestamp")
+    project_id: Optional[str] = None
+    project_name: Optional[str] = None
+    client_name: Optional[str] = None
     active_version: Optional[DatasetVersionResponse] = Field(default=None, description="Currently active version")
 
 
@@ -112,6 +150,9 @@ class DatasetDetailResponse(BaseModel):
     name: str
     description: Optional[str] = None
     tags: List[str] = Field(default_factory=list)
+    project_id: Optional[str] = None
+    project_name: Optional[str] = None
+    client_name: Optional[str] = None
     latest_version_number: int
     created_at: datetime
     updated_at: datetime
@@ -124,6 +165,7 @@ class DatasetCreateRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=255, description="Dataset name")
     description: Optional[str] = Field(default=None, description="Dataset description")
     tags: Optional[List[str]] = Field(default=None, description="List of tags")
+    project_id: Optional[str] = Field(default=None, description="Agency project that owns this dataset")
     content: str = Field(..., min_length=1, description="JSONL content string (one JSON object per line)")
 
 
@@ -238,6 +280,7 @@ class PairwiseRunStatusResponse(BaseModel):
     is_simulated: bool = False
     run_configuration: Optional[Dict[str, Any]] = None
     configuration_verified: bool = False
+    project_id: Optional[str] = None
 
 
 class PairwiseRunListItem(BaseModel):
@@ -248,6 +291,7 @@ class PairwiseRunListItem(BaseModel):
     status: RunStatus
     created_at: Optional[datetime] = None
     is_simulated: bool = False
+    project_id: Optional[str] = None
 
 
 class PairwiseRunsListResponse(BaseModel):

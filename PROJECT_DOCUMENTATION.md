@@ -67,7 +67,7 @@ The project supports both real LLM providers and mock provider execution, making
 
 ### Web UI
 
-- **Gradio**: Interactive web interface with four tabs for triggering evaluation runs, pairwise comparisons, and viewing results.
+- **Gradio**: Interactive web interface with six tabs for project setup, evaluation runs, pairwise comparisons, and results.
 
 ### Evaluation and ML Libraries
 
@@ -353,6 +353,10 @@ Datasets are JSONL files. Each line is one evaluation example.
 ### Dataset Versioning
 
 Datasets support immutable versioning. Each time a dataset is updated, a new version is created. Only one version can be "active" at a time. Evaluation runs reference the dataset version used, ensuring reproducibility.
+
+### Agency Projects
+
+An agency project represents one client product. It stores a project name, client name, description, and tags. A dataset can be assigned to one project, and single-model and pairwise runs inherit the dataset project when they are created. This keeps reports and run listings separated by client. Project links are nullable so existing records remain valid during migration; deleting a project unassigns related records without deleting their history.
 
 ## 8. Core Modules
 
@@ -1018,13 +1022,17 @@ A standalone Gradio application that communicates with the FastAPI layer via `ht
 
 ### Layout
 
-Uses `gr.Blocks()` with five tabs:
+Uses `gr.Blocks()` with six tabs:
 
-**Tab 1 -- Datasets**
+**Tab 1 -- Projects**
 
-Users upload UTF-8 JSONL files, create immutable versions, and select the active version. The API validates every uploaded file before storing it.
+Users create a client product workspace with a name, client name, description, and tags. The project becomes available while uploading a dataset.
 
-**Tab 2 -- Run Evaluation**
+**Tab 2 -- Datasets**
+
+Users upload UTF-8 JSONL files, assign them to an optional client project, create immutable versions, and select the active version. The API validates every uploaded file before storing it.
+
+**Tab 3 -- Run Evaluation**
 
 | Input | Type | Default |
 |---|---|---|
@@ -1041,7 +1049,7 @@ Users upload UTF-8 JSONL files, create immutable versions, and select the active
 
 On submit: POST to `http://localhost:8000/runs`, display the returned `run_id` and status in a `gr.JSON` output component.
 
-**Tab 3 -- View Results**
+**Tab 4 -- View Results**
 
 | Input | Type |
 |---|---|
@@ -1051,7 +1059,7 @@ On submit: GET `http://localhost:8000/runs/{run_id}`, display:
 - Run status as a `gr.Textbox`
 - Metrics as a `gr.Dataframe` with columns: Evaluator, Mean Score, Pass Rate, N
 
-**Tab 4 -- Pairwise Evaluation**
+**Tab 5 -- Pairwise Evaluation**
 
 | Input | Type | Default |
 |---|---|---|
@@ -1072,7 +1080,7 @@ On submit: GET `http://localhost:8000/runs/{run_id}`, display:
 
 On submit: POST to `http://localhost:8000/pairwise-runs`, display the returned `run_id` and status.
 
-**Tab 5 -- Pairwise Results**
+**Tab 6 -- Pairwise Results**
 
 | Input | Type |
 |---|---|
@@ -1455,7 +1463,7 @@ python app/ui/gradio_app.py
 - Structured logging with `structlog` for production-ready observability.
 - FastAPI automatic OpenAPI documentation at `/docs`.
 - Cohere provider expands the provider ecosystem.
-- Gradio UI makes evaluation accessible to non-technical users with four dedicated tabs.
+- Gradio UI makes evaluation accessible to non-technical users with six dedicated tabs.
 
 ## 23. Current Limitations and Future Improvements
 
@@ -1496,7 +1504,7 @@ This project is a modular LLM evaluation framework built around simple but stron
 - **Settings** centralize environment-based configuration.
 - **Metrics reporting** includes both average scores and pass rates for single-model runs, and win rates, Elo ratings, and average scores for pairwise runs.
 - **The REST API** (FastAPI) exposes the pipeline for programmatic access with automatic OpenAPI documentation.
-- **The Gradio UI** provides an interactive web interface with four tabs for non-technical users.
+- **The Gradio UI** provides an interactive web interface with six tabs for non-technical users.
 - **Structured logging** (structlog) provides production-ready observability across all modules.
 
 The architecture is intentionally modular and extensible, making it suitable for experimentation, local evaluation workflows, team-based API access, and future growth into a richer evaluation platform.

@@ -19,6 +19,11 @@ from app.api.schemas import (
     DatasetVersionResponse,
     DatasetAddVersionRequest,
     DatasetSetActiveVersionRequest,
+    ProjectCreateRequest,
+    ProjectUpdateRequest,
+    ProjectResponse,
+    ProjectsListResponse,
+    ProjectDeleteResponse,
     PairwiseRunRequest,
     PairwiseRunResponse,
     PairwiseRunStatusResponse,
@@ -39,6 +44,7 @@ from app.runners.pairwise_runner import (
     get_pairwise_comparisons,
 )
 from app.services.dataset_service import DatasetService
+from app.services.project_service import ProjectService
 from app.services.run_recovery import reconcile_abandoned_runs
 from app.schemas.outcomes import RunStatus
 
@@ -49,6 +55,7 @@ _single_execution_worker = asyncio.Lock()
 
 # Service singleton
 _dataset_service = DatasetService()
+_project_service = ProjectService()
 
 
 def _dataset_to_response(dataset: DatasetDB) -> DatasetResponse:
@@ -69,6 +76,9 @@ def _dataset_to_response(dataset: DatasetDB) -> DatasetResponse:
         name=dataset.name,
         description=dataset.description,
         tags=dataset.tags,
+        project_id=dataset.project_id,
+        project_name=dataset.project.name if dataset.project else None,
+        client_name=dataset.project.client_name if dataset.project else None,
         latest_version_number=dataset.latest_version_number,
         created_at=dataset.created_at,
         updated_at=dataset.updated_at,
@@ -94,11 +104,26 @@ def _dataset_to_detail(dataset: DatasetDB) -> DatasetDetailResponse:
         name=base.name,
         description=base.description,
         tags=base.tags,
+        project_id=base.project_id,
+        project_name=base.project_name,
+        client_name=base.client_name,
         latest_version_number=base.latest_version_number,
         created_at=base.created_at,
         updated_at=base.updated_at,
         active_version=base.active_version,
         versions=versions,
+    )
+
+
+def _project_to_response(project) -> ProjectResponse:
+    return ProjectResponse(
+        id=project.id,
+        name=project.name,
+        client_name=project.client_name,
+        description=project.description,
+        tags=project.tags,
+        created_at=project.created_at,
+        updated_at=project.updated_at,
     )
 
 
@@ -213,6 +238,7 @@ async def get_run(run_id: str):
         is_simulated = run.is_simulated
         run_configuration = run.run_configuration
         configuration_verified = run.configuration_verified
+        project_id = run.project_id
 
     evaluator_metrics = None
     if status in {RunStatus.RUNNING, RunStatus.COMPLETED, RunStatus.INTERRUPTED}:
@@ -244,6 +270,7 @@ async def get_run(run_id: str):
         is_simulated=is_simulated,
         run_configuration=run_configuration,
         configuration_verified=configuration_verified,
+        project_id=project_id,
     )
 
 
@@ -257,11 +284,60 @@ async def list_runs():
                 status=RunStatus(db_run.status),
                 created_at=db_run.created_at,
                 is_simulated=db_run.is_simulated,
+                project_id=db_run.project_id,
             )
             for db_run in db_runs
         ]
 
     return RunsListResponse(runs=runs)
+
+
+# ── Project Endpoints ────────────────────────────────────────
+
+@app.get("/projects", response_model=ProjectsListResponse)
+async def list_projects():
+    return ProjectsListResponse(
+        projects=[_project_to_response(project) for project in _project_service.list_projects()]
+    )
+
+
+@app.get("/projects/{project_id}", response_model=ProjectResponse)
+async def get_project(project_id: str):
+    project = _project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+    return _project_to_response(project)
+
+
+@app.post("/projects", response_model=ProjectResponse, status_code=201)
+async def create_project(req: ProjectCreateRequest):
+    project = await asyncio.to_thread(
+        _project_service.create_project, req.name, req.client_name, req.description, req.tags
+    )
+    return _project_to_response(project)
+
+
+@app.put("/projects/{project_id}", response_model=ProjectResponse)
+async def update_project(project_id: str, req: ProjectUpdateRequest):
+    project = await asyncio.to_thread(
+        _project_service.update_project,
+        project_id,
+        name=req.name,
+        client_name=req.client_name,
+        description=req.description,
+        tags=req.tags,
+    )
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+    return _project_to_response(project)
+
+
+@app.delete("/projects/{project_id}", response_model=ProjectDeleteResponse)
+async def delete_project(project_id: str):
+    deleted = await asyncio.to_thread(_project_service.delete_project, project_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+    return ProjectDeleteResponse(message="Project deleted; datasets and runs were unassigned.", id=project_id)
 
 
 # ── Dataset Endpoints ────────────────────────────────────────
@@ -270,8 +346,9 @@ async def list_runs():
 async def list_datasets(
     tag: Optional[str] = Query(default=None, description="Filter by tag"),
     search: Optional[str] = Query(default=None, description="Search by name"),
+    project_id: Optional[str] = Query(default=None, description="Filter by project"),
 ):
-    datasets = _dataset_service.list_datasets(tag=tag, search=search)
+    datasets = _dataset_service.list_datasets(tag=tag, search=search, project_id=project_id)
     return DatasetsListResponse(
         datasets=[_dataset_to_response(d) for d in datasets]
     )
@@ -294,6 +371,7 @@ async def create_dataset(req: DatasetCreateRequest):
             content_jsonl=req.content,
             description=req.description,
             tags=req.tags,
+            project_id=req.project_id,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -306,6 +384,7 @@ async def upload_dataset(
     name: str = Form(..., description="Dataset name"),
     description: Optional[str] = Form(default=None, description="Dataset description"),
     tags: Optional[str] = Form(default=None, description="Comma-separated tags"),
+    project_id: Optional[str] = Form(default=None, description="Project that owns this dataset"),
 ):
     file_content = await file.read()
     tag_list = [t.strip() for t in tags.split(",")] if tags else None
@@ -317,6 +396,7 @@ async def upload_dataset(
             filename=file.filename or "upload.jsonl",
             description=description,
             tags=tag_list,
+            project_id=project_id,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -497,6 +577,7 @@ async def get_pairwise_run(run_id: str, include_comparisons: bool = Query(defaul
         is_simulated = run.is_simulated
         run_configuration = run.run_configuration
         configuration_verified = run.configuration_verified
+        project_id = run.project_id
 
     pw_metrics = None
     comparisons = None
@@ -539,6 +620,7 @@ async def get_pairwise_run(run_id: str, include_comparisons: bool = Query(defaul
         is_simulated=is_simulated,
         run_configuration=run_configuration,
         configuration_verified=configuration_verified,
+        project_id=project_id,
     )
 
 
@@ -554,6 +636,7 @@ async def list_pairwise_runs():
                 status=RunStatus(db_run.status),
                 created_at=db_run.created_at,
                 is_simulated=db_run.is_simulated,
+                project_id=db_run.project_id,
             )
             for db_run in db_runs
         ]
