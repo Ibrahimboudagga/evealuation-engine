@@ -85,6 +85,29 @@ class RunsListResponse(BaseModel):
     runs: List[RunListItem]
 
 
+class EvaluationResultReviewItem(BaseModel):
+    """A persisted evaluator result with the evidence needed for review."""
+    id: int
+    example_id: str
+    evaluator_name: str
+    outcome: EvaluationOutcome
+    score: Optional[float] = None
+    prompt: str
+    prediction: str
+    expected_output: str
+    judge_explanation: Optional[str] = None
+    error_message: Optional[str] = None
+
+
+class RunResultsResponse(BaseModel):
+    """Filtered, per-example results for a single-model evaluation run."""
+    run_id: str
+    total_count: int
+    filtered_count: int
+    available_evaluators: List[str] = Field(default_factory=list)
+    results: List[EvaluationResultReviewItem]
+
+
 # ── Dataset Schemas ──────────────────────────────────────────
 
 class DatasetVersionResponse(BaseModel):

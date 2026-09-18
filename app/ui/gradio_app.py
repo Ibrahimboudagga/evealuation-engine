@@ -86,6 +86,89 @@ async def get_run_status(run_id):
         return f"Error: {e}", None, None
 
 
+async def review_run_results(run_id, evaluator, outcomes, score_min, score_max):
+    """Load filtered per-example results for the Gradio review page."""
+    if not run_id or not run_id.strip():
+        return (
+            "Enter a Run ID to review its results.",
+            [],
+            gr.update(choices=[], value=None),
+            [],
+            None,
+            gr.update(choices=["All"], value="All"),
+        )
+
+    params = []
+    if evaluator and evaluator != "All":
+        params.append(("evaluator", evaluator))
+    for outcome in outcomes or []:
+        params.append(("outcome", outcome))
+    if score_min is not None:
+        params.append(("score_min", score_min))
+    if score_max is not None:
+        params.append(("score_max", score_max))
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(f"{API_BASE}/runs/{run_id.strip()}/results", params=params)
+            response.raise_for_status()
+        data = response.json()
+        results = data["results"]
+        rows = [
+            [
+                item["example_id"],
+                item["evaluator_name"],
+                item["outcome"],
+                f"{item['score']:.3f}" if item["score"] is not None else "—",
+                (item["judge_explanation"] or "—")[:100],
+                (item["error_message"] or "—")[:100],
+            ]
+            for item in results
+        ]
+        result_choices = [
+            (
+                f"{item['example_id']} / {item['evaluator_name']} / {item['outcome']}",
+                str(item["id"]),
+            )
+            for item in results
+        ]
+        evaluator_choices = ["All", *data["available_evaluators"]]
+        selected_evaluator = evaluator if evaluator in evaluator_choices else "All"
+        summary = f"Showing {data['filtered_count']} of {data['total_count']} persisted results."
+        return (
+            summary,
+            rows,
+            gr.update(choices=result_choices, value=None),
+            results,
+            None,
+            gr.update(choices=evaluator_choices, value=selected_evaluator),
+        )
+    except httpx.HTTPStatusError as error:
+        return (
+            f"HTTP {error.response.status_code}: {error.response.text}",
+            [],
+            gr.update(choices=[], value=None),
+            [],
+            None,
+            gr.update(choices=["All"], value="All"),
+        )
+    except Exception as error:
+        return (
+            f"Error: {error}",
+            [],
+            gr.update(choices=[], value=None),
+            [],
+            None,
+            gr.update(choices=["All"], value="All"),
+        )
+
+
+def show_review_result(result_id, results):
+    if not result_id:
+        return None
+    return next((item for item in results or [] if str(item["id"]) == str(result_id)), None)
+
+
 async def submit_pairwise_run(
     dataset_id,
     dataset_version_id,
@@ -474,6 +557,43 @@ with gr.Blocks(title="LLM Evaluation Engine") as demo:
             inputs=[run_id_input],
             outputs=[status_output, metrics_output, configuration_output],
         )
+
+    with gr.Tab("Review Results"):
+        gr.Markdown("Inspect each persisted evaluation result and filter for low scores or provider and judge failures.")
+        with gr.Row():
+            review_run_id = gr.Textbox(label="Run ID")
+            review_evaluator = gr.Dropdown(label="Evaluator", choices=["All"], value="All")
+            review_outcomes = gr.CheckboxGroup(
+                label="Outcomes",
+                choices=["evaluated", "generation_error", "evaluation_error"],
+                value=["evaluated", "generation_error", "evaluation_error"],
+            )
+        with gr.Row():
+            review_score_min = gr.Number(label="Minimum Score (optional)", minimum=0, maximum=1, precision=3)
+            review_score_max = gr.Number(label="Maximum Score (optional)", minimum=0, maximum=1, precision=3)
+            review_button = gr.Button("Load Results", variant="primary")
+        review_summary = gr.Markdown("Enter a run ID, choose filters, then load results.")
+        review_table = gr.Dataframe(
+            headers=["Example", "Evaluator", "Outcome", "Score", "Judge Explanation", "Sanitized Error"],
+            label="Filtered Results",
+        )
+        review_selector = gr.Dropdown(label="Select a result for full details", choices=[])
+        review_detail = gr.JSON(label="Prompt, Output, Expected Answer, and Review Details")
+        review_state = gr.State([])
+
+        review_button.click(
+            fn=review_run_results,
+            inputs=[review_run_id, review_evaluator, review_outcomes, review_score_min, review_score_max],
+            outputs=[
+                review_summary,
+                review_table,
+                review_selector,
+                review_state,
+                review_detail,
+                review_evaluator,
+            ],
+        )
+        review_selector.change(fn=show_review_result, inputs=[review_selector, review_state], outputs=review_detail)
 
     # ── Pairwise Evaluation Tab ──────────────────────────────
 
