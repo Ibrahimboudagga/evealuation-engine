@@ -10,6 +10,8 @@ from app.api.schemas import (
     RunStatusResponse,
     RunListItem,
     RunsListResponse,
+    EvaluationResultReviewItem,
+    RunResultsResponse,
     EvaluatorMetric,
     DatasetResponse,
     DatasetDetailResponse,
@@ -33,7 +35,8 @@ from app.api.schemas import (
     PairwiseComparisonItem,
 )
 from app.database.connection import get_db, init_db
-from app.database.models import DatasetDB, EvaluationRunDB, PairwiseRunDB
+from app.database.models import DatasetDB, EvaluationRunDB, EvaluationResultDB, PairwiseRunDB
+from app.errors import sanitize_error
 from app.evaluators.registry import EvaluatorRegistry
 from app.evaluators.pairwise_judge import PairwiseJudgeEvaluator
 from app.providers.factory import ProviderFactory
@@ -46,7 +49,7 @@ from app.runners.pairwise_runner import (
 from app.services.dataset_service import DatasetService
 from app.services.project_service import ProjectService
 from app.services.run_recovery import reconcile_abandoned_runs
-from app.schemas.outcomes import RunStatus
+from app.schemas.outcomes import EvaluationOutcome, RunStatus
 
 log = structlog.get_logger()
 
@@ -290,6 +293,70 @@ async def list_runs():
         ]
 
     return RunsListResponse(runs=runs)
+
+
+@app.get("/runs/{run_id}/results", response_model=RunResultsResponse)
+async def list_run_results(
+    run_id: str,
+    evaluator: Optional[str] = Query(default=None, description="Filter by evaluator name"),
+    outcome: Optional[list[EvaluationOutcome]] = Query(default=None, description="Filter by one or more outcomes"),
+    score_min: Optional[float] = Query(default=None, ge=0.0, le=1.0, description="Minimum completed score"),
+    score_max: Optional[float] = Query(default=None, ge=0.0, le=1.0, description="Maximum completed score"),
+):
+    """Return reviewable persisted results without exposing raw provider errors."""
+    if score_min is not None and score_max is not None and score_min > score_max:
+        raise HTTPException(status_code=422, detail="score_min must be less than or equal to score_max")
+
+    with get_db() as db:
+        if not db.query(EvaluationRunDB.id).filter(EvaluationRunDB.id == run_id).first():
+            raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+
+        base_query = db.query(EvaluationResultDB).filter(EvaluationResultDB.run_id == run_id)
+        total_count = base_query.count()
+        available_evaluators = [
+            name
+            for (name,) in base_query.with_entities(EvaluationResultDB.evaluator_name)
+            .distinct()
+            .order_by(EvaluationResultDB.evaluator_name)
+            .all()
+        ]
+        query = base_query
+        if evaluator:
+            query = query.filter(EvaluationResultDB.evaluator_name == evaluator)
+        if outcome:
+            query = query.filter(EvaluationResultDB.outcome.in_([item.value for item in outcome]))
+        if score_min is not None:
+            query = query.filter(EvaluationResultDB.score >= score_min)
+        if score_max is not None:
+            query = query.filter(EvaluationResultDB.score <= score_max)
+        db_results = query.order_by(EvaluationResultDB.id).all()
+
+        results = []
+        for result in db_results:
+            metadata = result.metadata_dict
+            reason = metadata.get("reason")
+            results.append(
+                EvaluationResultReviewItem(
+                    id=result.id,
+                    example_id=result.example_id,
+                    evaluator_name=result.evaluator_name,
+                    outcome=EvaluationOutcome(result.outcome),
+                    score=result.score,
+                    prompt=result.prompt,
+                    prediction=result.prediction,
+                    expected_output=result.expected_output,
+                    judge_explanation=str(reason) if reason is not None else None,
+                    error_message=sanitize_error(result.error_message) if result.error_message else None,
+                )
+            )
+
+    return RunResultsResponse(
+        run_id=run_id,
+        total_count=total_count,
+        filtered_count=len(results),
+        available_evaluators=available_evaluators,
+        results=results,
+    )
 
 
 # ── Project Endpoints ────────────────────────────────────────

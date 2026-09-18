@@ -14,7 +14,7 @@ A modular evaluation engine for comparing LLM providers on structured datasets. 
 - **Structured logging**: `structlog`-based logging throughout all modules.
 - **SQLite persistence**: Datasets (with versions), runs, pairwise runs, and per-example results stored in `evals.db`.
 - **REST API**: FastAPI layer for triggering runs, checking status, managing datasets, and listing results.
-- **Web UI**: Gradio interface with six tabs for project setup, evaluation, pairwise comparison, and result browsing.
+- **Web UI**: Gradio interface with seven tabs for project setup, evaluation, detailed result review, pairwise comparison, and result browsing.
 - **Pydantic v2**: Typed schemas for settings, examples, results, and API request/response models.
 
 ## Project Structure
@@ -54,7 +54,7 @@ app/
     main.py              # FastAPI app (projects, runs, pairwise-runs, datasets endpoints)
     schemas.py           # Pydantic v2 request/response models
   ui/
-    gradio_app.py        # Gradio Blocks UI with 6 tabs (talks to FastAPI via httpx)
+    gradio_app.py        # Gradio Blocks UI with 7 tabs (talks to FastAPI via httpx)
 datasets/
   sample.jsonl           # Sample 5-example evaluation dataset
 tests/
@@ -249,6 +249,10 @@ Get run status and aggregated metrics.
   "error": null
 }
 ```
+
+#### `GET /runs/{run_id}/results`
+
+Review persisted per-example evaluator results. Filter with `evaluator`, `score_min`, `score_max`, and one or more `outcome` values (`evaluated`, `generation_error`, or `evaluation_error`). Each item includes the prompt, prediction, expected answer, judge explanation when available, and a sanitized error message.
 
 #### `GET /runs`
 
@@ -475,7 +479,7 @@ Delete a dataset and all its versions.
 
 ## Gradio Web UI
 
-The Gradio interface provides six tabs:
+The Gradio interface provides seven tabs:
 
 ### Tab 1 -- Projects
 
@@ -508,7 +512,11 @@ Enter a Run ID and click **Fetch Results**. The UI queries the API and displays:
 - Any sanitized run error
 - Metrics with valid-result counts, coverage, generation errors, and evaluation errors
 
-### Tab 5 -- Pairwise Evaluation
+### Tab 5 -- Review Results
+
+Load a single-model run and filter by evaluator, score range, or result outcomes. Select a filtered item to inspect its prompt, output, expected answer, judge explanation, and sanitized failure message.
+
+### Tab 6 -- Pairwise Evaluation
 
 Compare two models side-by-side on the same dataset.
 
@@ -519,7 +527,7 @@ Inputs:
 - Judge: Provider, Model, API Key
 - Concurrency (slider, 1-20)
 
-### Tab 6 -- Pairwise Results
+### Tab 7 -- Pairwise Results
 
 Enter a Pairwise Run ID and click **Fetch Results**. Displays:
 - Run status with model names, simulation label, and any sanitized error
