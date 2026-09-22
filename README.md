@@ -112,6 +112,14 @@ Store the returned `api_token` in a secret manager. API requests then use `Autho
 
 Owners save a provider once using `POST /provider-connections` or the **Provider Connections** Gradio tab. The API encrypts an API key with Fernet, never returns it, and stores only a connection ID in the run configuration and reports. Workspace runs select connection IDs instead of submitting raw keys. `credential_reference` is supported as a stored reference; resolving one requires an external secret resolver in the deployment.
 
+### Agency delivery workflow
+
+Use **Evaluation Templates** to save the candidate and judge connections, rubric, concurrency, timeout, release rules, and report preferences. Launch a template against any dataset version with `POST /evaluation-templates/{template_id}/launch`.
+
+Use `POST /report-shares` to create an expiring link for exactly one run or project. The returned URL is the only public capability, returns a read-only branded HTML report, and becomes unavailable after `DELETE /report-shares/{share_id}`. Shared reports do not grant API access or expose provider credentials.
+
+`GET /projects/{project_id}/dashboard` returns the latest run, baseline/release state, coverage and quality trends, and sanitized recent failures. The Gradio **Project Dashboard** tab presents the same data.
+
 ### 3. Run the CLI
 
 ```bash

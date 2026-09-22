@@ -26,7 +26,10 @@ class RunRequest(BaseModel):
     evaluator_model: Optional[str] = Field(default=None, description="Evaluator/judge model ID / identifier")
     evaluator_api_key: Optional[str] = Field(default=None, description="Authentication key for the evaluator model")
     concurrency: int = Field(default=5, ge=1, le=50, description="Maximum parallel evaluations")
+    timeout_seconds: float = Field(default=60.0, gt=0, le=600, description="Per-provider call timeout")
     judge_prompt_template: Optional[str] = Field(default=None, description="Optional custom judge prompt template text")
+    release_rules: Optional[Dict[str, Any]] = Field(default=None, description="Saved template release thresholds")
+    report_preferences: Optional[Dict[str, Any]] = Field(default=None, description="Saved template report preferences")
 
     @model_validator(mode="after")
     def validate_dataset_source(self) -> "RunRequest":
@@ -97,6 +100,66 @@ class ProviderConnectionResponse(BaseModel):
     credential_configured: bool
     created_at: datetime
     updated_at: datetime
+
+
+class EvaluationTemplateCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+    description: Optional[str] = None
+    candidate_connection_id: str
+    candidate_model: Optional[str] = None
+    evaluator_connection_id: str
+    evaluator_model: Optional[str] = None
+    judge_prompt_template: Optional[str] = None
+    concurrency: int = Field(default=5, ge=1, le=50)
+    timeout_seconds: float = Field(default=60.0, gt=0, le=600)
+    coverage_minimum: float = Field(default=0.95, ge=0, le=1)
+    exact_match_pass_rate_max_drop: float = Field(default=0.05, ge=0, le=1)
+    report_preferences: Dict[str, Any] = Field(default_factory=dict)
+
+
+class EvaluationTemplateResponse(EvaluationTemplateCreateRequest):
+    id: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class TemplateLaunchRequest(BaseModel):
+    dataset_id: str
+    dataset_version_id: Optional[str] = None
+
+
+class ReportShareCreateRequest(BaseModel):
+    run_id: Optional[str] = None
+    project_id: Optional[str] = None
+    expires_in_hours: int = Field(default=168, ge=1, le=8760)
+    branding: Dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def one_scope(self):
+        if bool(self.run_id) == bool(self.project_id):
+            raise ValueError("Provide exactly one of run_id or project_id.")
+        return self
+
+
+class ReportShareResponse(BaseModel):
+    id: str
+    project_id: Optional[str]
+    run_id: Optional[str]
+    expires_at: datetime
+    revoked_at: Optional[datetime]
+    url: Optional[str] = Field(default=None, description="Shown only when the share is created")
+
+
+class ProjectDashboardResponse(BaseModel):
+    project_id: str
+    client_name: str
+    project_name: str
+    latest_run: Optional[Dict[str, Any]] = None
+    baseline_run_id: Optional[str] = None
+    release_check: Optional[Dict[str, Any]] = None
+    coverage_trend: List[Dict[str, Any]] = Field(default_factory=list)
+    quality_trend: List[Dict[str, Any]] = Field(default_factory=list)
+    recent_failures: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class EvaluatorMetric(BaseModel):

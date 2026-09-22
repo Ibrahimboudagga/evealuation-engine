@@ -408,6 +408,85 @@ async def create_provider_connection(name, provider, model, api_key, base_url, a
         return {"error": str(error)}
 
 
+async def create_evaluation_template(name, candidate_connection, judge_connection, prompt, concurrency, timeout, coverage, max_drop):
+    if not name or not candidate_connection or not judge_connection:
+        return {"error": "Enter a name and select candidate and judge connections."}
+    payload = {
+        "name": name.strip(), "candidate_connection_id": candidate_connection,
+        "evaluator_connection_id": judge_connection, "judge_prompt_template": prompt or None,
+        "concurrency": int(concurrency), "timeout_seconds": float(timeout),
+        "coverage_minimum": float(coverage), "exact_match_pass_rate_max_drop": float(max_drop),
+        "report_preferences": {},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=15.0, headers=_api_headers()) as client:
+            response = await client.post(f"{API_BASE}/evaluation-templates", json=payload)
+            response.raise_for_status()
+        return {"message": "Template saved.", "template": response.json()}
+    except httpx.HTTPStatusError as error:
+        return {"error": f"HTTP {error.response.status_code}: {error.response.text}"}
+    except Exception as error:
+        return {"error": str(error)}
+
+
+async def template_choice_update():
+    try:
+        async with httpx.AsyncClient(timeout=10.0, headers=_api_headers()) as client:
+            response = await client.get(f"{API_BASE}/evaluation-templates")
+            response.raise_for_status()
+        return gr.update(choices=[(item["name"], item["id"]) for item in response.json()], value=None)
+    except Exception:
+        return gr.update(choices=[], value=None)
+
+
+async def launch_template(template_id, dataset_id, dataset_version_id):
+    if not template_id or not dataset_id:
+        return {"error": "Select a template and dataset."}
+    try:
+        async with httpx.AsyncClient(timeout=30.0, headers=_api_headers()) as client:
+            response = await client.post(
+                f"{API_BASE}/evaluation-templates/{template_id}/launch",
+                json={"dataset_id": dataset_id, "dataset_version_id": dataset_version_id or None},
+            )
+            response.raise_for_status()
+        return response.json()
+    except httpx.HTTPStatusError as error:
+        return {"error": f"HTTP {error.response.status_code}: {error.response.text}"}
+    except Exception as error:
+        return {"error": str(error)}
+
+
+async def create_report_share(run_id, hours, agency_name, report_title):
+    if not run_id:
+        return {"error": "Enter a run ID to share."}
+    try:
+        async with httpx.AsyncClient(timeout=15.0, headers=_api_headers()) as client:
+            response = await client.post(f"{API_BASE}/report-shares", json={
+                "run_id": run_id.strip(), "expires_in_hours": int(hours),
+                "branding": {"agency_name": agency_name or "Evaluation Summary", "report_title": report_title or "Client Report"},
+            })
+            response.raise_for_status()
+        return response.json()
+    except httpx.HTTPStatusError as error:
+        return {"error": f"HTTP {error.response.status_code}: {error.response.text}"}
+    except Exception as error:
+        return {"error": str(error)}
+
+
+async def get_project_dashboard(project_id):
+    if not project_id:
+        return {"error": "Select a project."}
+    try:
+        async with httpx.AsyncClient(timeout=20.0, headers=_api_headers()) as client:
+            response = await client.get(f"{API_BASE}/projects/{project_id}/dashboard")
+            response.raise_for_status()
+        return response.json()
+    except httpx.HTTPStatusError as error:
+        return {"error": f"HTTP {error.response.status_code}: {error.response.text}"}
+    except Exception as error:
+        return {"error": str(error)}
+
+
 async def refresh_version_choices(dataset_id):
     if not dataset_id:
         return gr.update(choices=[], value=None)
@@ -579,6 +658,41 @@ with gr.Blocks(title="LLM Evaluation Engine") as demo:
             fn=create_provider_connection,
             inputs=[connection_name, connection_provider, connection_model, connection_api_key, connection_base_url, connection_unauthenticated],
             outputs=connection_output,
+        )
+
+    with gr.Tab("Evaluation Templates"):
+        gr.Markdown("Save the standard candidate, judge, rubric, timeout, release-rule, and report settings for a client workflow, then launch it from a dataset version.")
+        with gr.Row():
+            with gr.Column():
+                template_name = gr.Textbox(label="Template Name")
+                template_candidate_connection = gr.Dropdown(label="Candidate Connection", choices=[])
+                template_judge_connection = gr.Dropdown(label="Judge Connection", choices=[])
+                template_prompt = gr.Textbox(label="Judge Rubric / Prompt (optional)", lines=3)
+                template_concurrency = gr.Slider(minimum=1, maximum=20, value=5, step=1, label="Concurrency")
+                template_timeout = gr.Slider(minimum=1, maximum=300, value=60, step=1, label="Timeout (seconds)")
+                template_coverage = gr.Number(label="Minimum Coverage", value=0.95, minimum=0, maximum=1)
+                template_max_drop = gr.Number(label="Maximum Pass-Rate Drop", value=0.05, minimum=0, maximum=1)
+                template_save_button = gr.Button("Save Template", variant="primary")
+            with gr.Column():
+                launch_template_choice = gr.Dropdown(label="Saved Template", choices=[])
+                launch_template_dataset = gr.Dropdown(label="Dataset", choices=[])
+                launch_template_version = gr.Dropdown(label="Dataset Version", choices=[])
+                refresh_templates_button = gr.Button("Refresh Templates and Datasets")
+                template_launch_button = gr.Button("Launch Standard Evaluation", variant="primary")
+                template_output = gr.JSON(label="Template Result")
+        template_save_button.click(
+            fn=create_evaluation_template,
+            inputs=[template_name, template_candidate_connection, template_judge_connection, template_prompt, template_concurrency, template_timeout, template_coverage, template_max_drop],
+            outputs=template_output,
+        ).then(fn=template_choice_update, outputs=launch_template_choice)
+        refresh_templates_button.click(fn=template_choice_update, outputs=launch_template_choice)
+        refresh_templates_button.click(fn=dataset_choice_update, outputs=launch_template_dataset)
+        refresh_templates_button.click(fn=run_provider_connection_choice_updates, outputs=[template_candidate_connection, template_judge_connection])
+        launch_template_dataset.change(fn=refresh_version_choices, inputs=launch_template_dataset, outputs=launch_template_version)
+        template_launch_button.click(
+            fn=launch_template,
+            inputs=[launch_template_choice, launch_template_dataset, launch_template_version],
+            outputs=template_output,
         )
 
     with gr.Tab("Projects"):
@@ -762,6 +876,24 @@ with gr.Blocks(title="LLM Evaluation Engine") as demo:
             inputs=[report_run_id, report_format],
             outputs=[report_export_status, report_download],
         )
+        gr.Markdown("### Read-only client link")
+        with gr.Row():
+            share_run_id = gr.Textbox(label="Completed Run ID")
+            share_hours = gr.Slider(label="Expires In Hours", minimum=1, maximum=720, value=168, step=1)
+            share_agency_name = gr.Textbox(label="Agency Branding", value="Evaluation Summary")
+            share_title = gr.Textbox(label="Report Title", value="Client Evaluation Report")
+        share_button = gr.Button("Create Expiring Client Link")
+        share_output = gr.JSON(label="Share Link — copy it now; it is shown only at creation")
+        share_button.click(fn=create_report_share, inputs=[share_run_id, share_hours, share_agency_name, share_title], outputs=share_output)
+
+    with gr.Tab("Project Dashboard"):
+        gr.Markdown("Review the latest release state, coverage and quality trends, and recent evaluation failures for one client project.")
+        dashboard_project = gr.Dropdown(label="Client Project", choices=[])
+        dashboard_refresh = gr.Button("Refresh Projects")
+        dashboard_load = gr.Button("Load Selected Dashboard", variant="primary")
+        dashboard_output = gr.JSON(label="Project Health")
+        dashboard_refresh.click(fn=project_choice_update, outputs=dashboard_project)
+        dashboard_load.click(fn=get_project_dashboard, inputs=dashboard_project, outputs=dashboard_output)
 
     with gr.Tab("Release Checks"):
         gr.Markdown("Mark a completed run as the baseline, then compare a later completed run against the configured release rules.")
@@ -847,6 +979,10 @@ with gr.Blocks(title="LLM Evaluation Engine") as demo:
         outputs=[candidate_connection, evaluator_connection, pw_model_a_connection, pw_model_b_connection, pw_judge_connection],
     )
     demo.load(fn=project_choice_update, outputs=upload_project)
+    demo.load(fn=template_choice_update, outputs=launch_template_choice)
+    demo.load(fn=project_choice_update, outputs=dashboard_project)
+    demo.load(fn=dataset_choice_update, outputs=launch_template_dataset)
+    demo.load(fn=run_provider_connection_choice_updates, outputs=[template_candidate_connection, template_judge_connection])
 
     with gr.Tab("Pairwise Results"):
         gr.Markdown("Look up a pairwise evaluation run by its ID.")
