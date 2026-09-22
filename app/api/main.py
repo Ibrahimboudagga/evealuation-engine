@@ -2,12 +2,18 @@ import asyncio
 import structlog
 from typing import Literal, Optional
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, UploadFile, File, Form, Query
 from fastapi.responses import Response
 
 from app.api.schemas import (
     RunRequest,
     RunResponse,
+    WorkspaceBootstrapRequest,
+    WorkspaceBootstrapResponse,
+    WorkspaceMemberCreateRequest,
+    WorkspaceMemberResponse,
+    ProviderConnectionCreateRequest,
+    ProviderConnectionResponse,
     RunStatusResponse,
     RunListItem,
     RunsListResponse,
@@ -39,7 +45,7 @@ from app.api.schemas import (
     PairwiseComparisonItem,
 )
 from app.database.connection import get_db, init_db
-from app.database.models import DatasetDB, EvaluationRunDB, EvaluationResultDB, PairwiseRunDB
+from app.database.models import DatasetDB, EvaluationRunDB, EvaluationResultDB, PairwiseRunDB, ProjectDB
 from app.errors import sanitize_error
 from app.evaluators.registry import EvaluatorRegistry
 from app.evaluators.pairwise_judge import PairwiseJudgeEvaluator
@@ -55,6 +61,8 @@ from app.services.baseline_service import BaselineService
 from app.services.demo_seed import DemoSeedService
 from app.services.project_service import ProjectService
 from app.services.report_service import ReportService
+from app.services.identity_service import AuthContext, IdentityService, OWNER_ROLES, WRITE_ROLES
+from app.services.provider_connection_service import ProviderConnectionService
 from app.services.run_recovery import reconcile_abandoned_runs
 from app.schemas.outcomes import EvaluationOutcome, RunStatus
 
@@ -69,6 +77,95 @@ _project_service = ProjectService()
 _report_service = ReportService()
 _baseline_service = BaselineService()
 _demo_seed_service = DemoSeedService()
+_identity_service = IdentityService()
+_provider_connection_service = ProviderConnectionService()
+
+
+async def get_auth_context(
+    authorization: Optional[str] = Header(default=None),
+    x_workspace_id: Optional[str] = Header(default=None),
+) -> Optional[AuthContext]:
+    """Allow unauthenticated setup only before the first owner is bootstrapped."""
+    has_users = await asyncio.to_thread(_identity_service.has_users)
+    if not authorization:
+        if not has_users:
+            return None
+        raise HTTPException(status_code=401, detail="Authorization: Bearer <workspace API token> is required")
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise HTTPException(status_code=401, detail="Use Authorization: Bearer <workspace API token>")
+    try:
+        return await asyncio.to_thread(_identity_service.authenticate, token, x_workspace_id)
+    except ValueError as error:
+        raise HTTPException(status_code=401, detail=str(error))
+
+
+def _require_role(context: Optional[AuthContext], allowed_roles: set[str]) -> None:
+    if context is not None and context.role not in allowed_roles:
+        raise HTTPException(status_code=403, detail="Your workspace role does not allow this action")
+
+
+def _require_project_access(project_id: str, context: Optional[AuthContext], write: bool = False) -> ProjectDB:
+    with get_db() as db:
+        project = db.query(ProjectDB).filter(ProjectDB.id == project_id).first()
+        if not project:
+            raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+        if context is not None:
+            if project.workspace_id != context.workspace_id:
+                raise HTTPException(status_code=404, detail="Project not found in this workspace")
+            if write:
+                _require_role(context, WRITE_ROLES)
+        return project
+
+
+def _require_dataset_access(dataset_id: str, context: Optional[AuthContext], write: bool = False) -> DatasetDB:
+    with get_db() as db:
+        dataset = db.query(DatasetDB).filter(DatasetDB.id == dataset_id).first()
+        if not dataset:
+            raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
+        if context is not None:
+            if not dataset.project_id:
+                raise HTTPException(status_code=404, detail="Dataset is not assigned to this workspace")
+            _require_project_access(dataset.project_id, context, write=write)
+        return dataset
+
+
+def _require_run_access(run_id: str, context: Optional[AuthContext], write: bool = False) -> EvaluationRunDB:
+    with get_db() as db:
+        run = db.query(EvaluationRunDB).filter(EvaluationRunDB.id == run_id).first()
+        if not run:
+            raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+        if context is not None:
+            if not run.project_id:
+                raise HTTPException(status_code=404, detail="Run is not assigned to this workspace")
+            _require_project_access(run.project_id, context, write=write)
+        return run
+
+
+def _require_pairwise_run_access(run_id: str, context: Optional[AuthContext], write: bool = False) -> PairwiseRunDB:
+    with get_db() as db:
+        run = db.query(PairwiseRunDB).filter(PairwiseRunDB.id == run_id).first()
+        if not run:
+            raise HTTPException(status_code=404, detail=f"Pairwise run '{run_id}' not found")
+        if context is not None:
+            if not run.project_id:
+                raise HTTPException(status_code=404, detail="Run is not assigned to this workspace")
+            _require_project_access(run.project_id, context, write=write)
+        return run
+
+
+def _connection_to_response(connection) -> ProviderConnectionResponse:
+    return ProviderConnectionResponse(
+        id=connection.id,
+        name=connection.name,
+        provider=connection.provider,
+        default_model=connection.default_model,
+        base_url=connection.base_url,
+        allow_unauthenticated=connection.allow_unauthenticated,
+        credential_configured=bool(connection.encrypted_api_key or connection.credential_reference),
+        created_at=connection.created_at,
+        updated_at=connection.updated_at,
+    )
 
 
 def _dataset_to_response(dataset: DatasetDB) -> DatasetResponse:
@@ -148,16 +245,99 @@ def startup():
         log.info("abandoned_runs_reconciled", **recovered)
 
 
+@app.post("/auth/bootstrap", response_model=WorkspaceBootstrapResponse, status_code=201)
+async def bootstrap_workspace(req: WorkspaceBootstrapRequest):
+    """Create the first local owner and claim pre-workspace project records."""
+    try:
+        context, token = await asyncio.to_thread(
+            _identity_service.bootstrap, req.email, req.display_name, req.workspace_name
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error))
+    return WorkspaceBootstrapResponse(
+        user_id=context.user_id, workspace_id=context.workspace_id, role="owner", api_token=token
+    )
+
+
+@app.post("/workspace/members", response_model=WorkspaceMemberResponse, status_code=201)
+async def add_workspace_member(
+    req: WorkspaceMemberCreateRequest,
+    context: Optional[AuthContext] = Depends(get_auth_context),
+):
+    if context is None:
+        raise HTTPException(status_code=401, detail="Bootstrap an owner before adding workspace members")
+    try:
+        member, token = await asyncio.to_thread(
+            _identity_service.add_member, context, req.email, req.display_name, req.role
+        )
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    return WorkspaceMemberResponse(
+        user_id=member.user_id, email=member.email, workspace_id=member.workspace_id,
+        role=member.role, api_token=token or None,
+    )
+
+
+@app.get("/provider-connections", response_model=list[ProviderConnectionResponse])
+async def list_provider_connections(context: Optional[AuthContext] = Depends(get_auth_context)):
+    if context is None:
+        raise HTTPException(status_code=401, detail="Bootstrap an owner before configuring provider connections")
+    _require_role(context, WRITE_ROLES | {"viewer", "client_viewer"})
+    connections = await asyncio.to_thread(_provider_connection_service.list, context.workspace_id)
+    return [_connection_to_response(connection) for connection in connections]
+
+
+@app.post("/provider-connections", response_model=ProviderConnectionResponse, status_code=201)
+async def create_provider_connection(
+    req: ProviderConnectionCreateRequest,
+    context: Optional[AuthContext] = Depends(get_auth_context),
+):
+    if context is None:
+        raise HTTPException(status_code=401, detail="Bootstrap an owner before configuring provider connections")
+    _require_role(context, OWNER_ROLES)
+    try:
+        connection = await asyncio.to_thread(
+            _provider_connection_service.create,
+            context.workspace_id, req.name, req.provider, req.default_model, req.api_key,
+            req.credential_reference, req.base_url, req.allow_unauthenticated,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    return _connection_to_response(connection)
+
+
+@app.delete("/provider-connections/{connection_id}", status_code=204)
+async def delete_provider_connection(
+    connection_id: str,
+    context: Optional[AuthContext] = Depends(get_auth_context),
+):
+    if context is None:
+        raise HTTPException(status_code=401, detail="Bootstrap an owner before configuring provider connections")
+    _require_role(context, OWNER_ROLES)
+    deleted = await asyncio.to_thread(_provider_connection_service.delete, context.workspace_id, connection_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Provider connection not found")
+    return Response(status_code=204)
+
+
 @app.post("/demo/seed", response_model=DemoSeedResponse)
-async def seed_agency_demo():
+async def seed_agency_demo(context: Optional[AuthContext] = Depends(get_auth_context)):
     """Create an idempotent mock-only demo workspace with sample datasets."""
-    return DemoSeedResponse(**(await asyncio.to_thread(_demo_seed_service.seed)))
+    _require_role(context, WRITE_ROLES)
+    return DemoSeedResponse(**(await asyncio.to_thread(_demo_seed_service.seed, context.workspace_id if context else None)))
 
 
 # ── Existing Run Endpoints ───────────────────────────────────
 
 @app.post("/runs", response_model=RunResponse)
-async def create_run(req: RunRequest):
+async def create_run(req: RunRequest, context: Optional[AuthContext] = Depends(get_auth_context)):
+    _require_role(context, WRITE_ROLES)
+    if context is not None and req.dataset_path:
+        raise HTTPException(status_code=400, detail="Workspace runs must use a registered dataset_id.")
+    if req.dataset_id:
+        _require_dataset_access(req.dataset_id, context, write=True)
     examples = None
     if req.dataset_path:
         try:
@@ -165,14 +345,58 @@ async def create_run(req: RunRequest):
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Failed to load dataset: {e}")
 
+    candidate_provider_name = req.candidate_provider
+    candidate_model_name = req.candidate_model
+    candidate_api_key = req.candidate_api_key
+    candidate_base_url = req.candidate_base_url
+    candidate_allow_unauthenticated = req.candidate_allow_unauthenticated
+    if req.candidate_connection_id:
+        if context is None:
+            raise HTTPException(status_code=401, detail="Provider connections require workspace authentication")
+        try:
+            connection = await asyncio.to_thread(
+                _provider_connection_service.resolve, context.workspace_id, req.candidate_connection_id
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error))
+        candidate_provider_name = connection.provider
+        candidate_model_name = req.candidate_model or connection.default_model
+        candidate_api_key = connection.api_key
+        candidate_base_url = connection.base_url
+        candidate_allow_unauthenticated = connection.allow_unauthenticated
+    elif context is not None and req.candidate_api_key:
+        raise HTTPException(status_code=400, detail="Store candidate credentials in a workspace provider connection.")
+
+    evaluator_provider_name = req.evaluator_provider
+    evaluator_model_name = req.evaluator_model
+    evaluator_api_key = req.evaluator_api_key
+    evaluator_base_url = None
+    evaluator_allow_unauthenticated = False
+    if req.evaluator_connection_id:
+        if context is None:
+            raise HTTPException(status_code=401, detail="Provider connections require workspace authentication")
+        try:
+            connection = await asyncio.to_thread(
+                _provider_connection_service.resolve, context.workspace_id, req.evaluator_connection_id
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error))
+        evaluator_provider_name = connection.provider
+        evaluator_model_name = req.evaluator_model or connection.default_model
+        evaluator_api_key = connection.api_key
+        evaluator_base_url = connection.base_url
+        evaluator_allow_unauthenticated = connection.allow_unauthenticated
+    elif context is not None and req.evaluator_api_key:
+        raise HTTPException(status_code=400, detail="Store judge credentials in a workspace provider connection.")
+
     try:
         candidate_provider = await asyncio.to_thread(
             ProviderFactory.create,
-            provider=req.candidate_provider,
-            model_id=req.candidate_model,
-            api_key=req.candidate_api_key,
-            base_url=req.candidate_base_url,
-            allow_unauthenticated=req.candidate_allow_unauthenticated,
+            provider=candidate_provider_name,
+            model_id=candidate_model_name,
+            api_key=candidate_api_key,
+            base_url=candidate_base_url,
+            allow_unauthenticated=candidate_allow_unauthenticated,
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to create candidate provider: {e}")
@@ -180,9 +404,11 @@ async def create_run(req: RunRequest):
     try:
         evaluator_provider = await asyncio.to_thread(
             ProviderFactory.create,
-            provider=req.evaluator_provider,
-            model_id=req.evaluator_model,
-            api_key=req.evaluator_api_key,
+            provider=evaluator_provider_name,
+            model_id=evaluator_model_name,
+            api_key=evaluator_api_key,
+            base_url=evaluator_base_url,
+            allow_unauthenticated=evaluator_allow_unauthenticated,
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to create evaluator provider: {e}")
@@ -197,14 +423,16 @@ async def create_run(req: RunRequest):
         concurrency_limit=req.concurrency,
         requested_configuration={
             "candidate": {
-                "provider": req.candidate_provider,
-                "model": req.candidate_model,
-                "base_url": req.candidate_base_url,
-                "allow_unauthenticated": req.candidate_allow_unauthenticated,
+                "provider": candidate_provider_name,
+                "model": candidate_model_name,
+                "connection_id": req.candidate_connection_id,
+                "base_url": candidate_base_url,
+                "allow_unauthenticated": candidate_allow_unauthenticated,
             },
             "judge": {
-                "provider": req.evaluator_provider,
-                "model": req.evaluator_model,
+                "provider": evaluator_provider_name,
+                "model": evaluator_model_name,
+                "connection_id": req.evaluator_connection_id,
             },
             "judge_prompt_template": req.judge_prompt_template,
         },
@@ -244,7 +472,8 @@ async def create_run(req: RunRequest):
 
 
 @app.get("/runs/{run_id}", response_model=RunStatusResponse)
-async def get_run(run_id: str):
+async def get_run(run_id: str, context: Optional[AuthContext] = Depends(get_auth_context)):
+    _require_run_access(run_id, context)
     with get_db() as db:
         run = db.query(EvaluationRunDB).filter(EvaluationRunDB.id == run_id).first()
         if not run:
@@ -296,9 +525,11 @@ async def get_run(run_id: str):
 
 
 @app.get("/runs", response_model=RunsListResponse)
-async def list_runs(baseline_only: bool = Query(default=False, description="List only marked baselines")):
+async def list_runs(baseline_only: bool = Query(default=False, description="List only marked baselines"), context: Optional[AuthContext] = Depends(get_auth_context)):
     with get_db() as db:
         query = db.query(EvaluationRunDB)
+        if context is not None:
+            query = query.join(ProjectDB, EvaluationRunDB.project_id == ProjectDB.id).filter(ProjectDB.workspace_id == context.workspace_id)
         if baseline_only:
             query = query.filter(EvaluationRunDB.is_baseline == True)
         db_runs = query.order_by(EvaluationRunDB.created_at.desc()).all()
@@ -318,7 +549,8 @@ async def list_runs(baseline_only: bool = Query(default=False, description="List
 
 
 @app.put("/runs/{run_id}/baseline", response_model=BaselineMarkResponse)
-async def mark_run_as_baseline(run_id: str):
+async def mark_run_as_baseline(run_id: str, context: Optional[AuthContext] = Depends(get_auth_context)):
+    _require_run_access(run_id, context, write=True)
     try:
         run = await asyncio.to_thread(_baseline_service.mark_baseline, run_id)
     except ValueError as error:
@@ -332,7 +564,10 @@ async def compare_run_to_baseline(
     baseline_run_id: str = Query(..., description="Completed run previously marked as a baseline"),
     coverage_minimum: float = Query(default=0.95, ge=0.0, le=1.0),
     exact_match_pass_rate_max_drop: float = Query(default=0.05, ge=0.0, le=1.0),
+    context: Optional[AuthContext] = Depends(get_auth_context),
 ):
+    _require_run_access(run_id, context)
+    _require_run_access(baseline_run_id, context)
     try:
         comparison = await asyncio.to_thread(
             _baseline_service.compare,
@@ -353,11 +588,13 @@ async def list_run_results(
     outcome: Optional[list[EvaluationOutcome]] = Query(default=None, description="Filter by one or more outcomes"),
     score_min: Optional[float] = Query(default=None, ge=0.0, le=1.0, description="Minimum completed score"),
     score_max: Optional[float] = Query(default=None, ge=0.0, le=1.0, description="Maximum completed score"),
+    context: Optional[AuthContext] = Depends(get_auth_context),
 ):
     """Return reviewable persisted results without exposing raw provider errors."""
     if score_min is not None and score_max is not None and score_min > score_max:
         raise HTTPException(status_code=422, detail="score_min must be less than or equal to score_max")
 
+    _require_run_access(run_id, context)
     with get_db() as db:
         if not db.query(EvaluationRunDB.id).filter(EvaluationRunDB.id == run_id).first():
             raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
@@ -414,8 +651,10 @@ async def list_run_results(
 async def export_run_report(
     run_id: str,
     report_format: Literal["json", "csv", "html"] = Query(default="json", alias="format"),
+    context: Optional[AuthContext] = Depends(get_auth_context),
 ):
     """Download a client-ready JSON, CSV, or HTML evaluation report."""
+    _require_run_access(run_id, context)
     try:
         report = await asyncio.to_thread(_report_service.build_run_report, run_id)
     except ValueError as error:
@@ -442,30 +681,33 @@ async def export_run_report(
 # ── Project Endpoints ────────────────────────────────────────
 
 @app.get("/projects", response_model=ProjectsListResponse)
-async def list_projects():
+async def list_projects(context: Optional[AuthContext] = Depends(get_auth_context)):
     return ProjectsListResponse(
-        projects=[_project_to_response(project) for project in _project_service.list_projects()]
+        projects=[_project_to_response(project) for project in _project_service.list_projects(
+            context.workspace_id if context else None
+        )]
     )
 
 
 @app.get("/projects/{project_id}", response_model=ProjectResponse)
-async def get_project(project_id: str):
-    project = _project_service.get_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+async def get_project(project_id: str, context: Optional[AuthContext] = Depends(get_auth_context)):
+    project = _require_project_access(project_id, context)
     return _project_to_response(project)
 
 
 @app.post("/projects", response_model=ProjectResponse, status_code=201)
-async def create_project(req: ProjectCreateRequest):
+async def create_project(req: ProjectCreateRequest, context: Optional[AuthContext] = Depends(get_auth_context)):
+    _require_role(context, WRITE_ROLES)
     project = await asyncio.to_thread(
-        _project_service.create_project, req.name, req.client_name, req.description, req.tags
+        _project_service.create_project, req.name, req.client_name, req.description, req.tags,
+        context.workspace_id if context else None,
     )
     return _project_to_response(project)
 
 
 @app.put("/projects/{project_id}", response_model=ProjectResponse)
-async def update_project(project_id: str, req: ProjectUpdateRequest):
+async def update_project(project_id: str, req: ProjectUpdateRequest, context: Optional[AuthContext] = Depends(get_auth_context)):
+    _require_project_access(project_id, context, write=True)
     project = await asyncio.to_thread(
         _project_service.update_project,
         project_id,
@@ -480,7 +722,8 @@ async def update_project(project_id: str, req: ProjectUpdateRequest):
 
 
 @app.delete("/projects/{project_id}", response_model=ProjectDeleteResponse)
-async def delete_project(project_id: str):
+async def delete_project(project_id: str, context: Optional[AuthContext] = Depends(get_auth_context)):
+    _require_project_access(project_id, context, write=True)
     deleted = await asyncio.to_thread(_project_service.delete_project, project_id)
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
@@ -494,23 +737,32 @@ async def list_datasets(
     tag: Optional[str] = Query(default=None, description="Filter by tag"),
     search: Optional[str] = Query(default=None, description="Search by name"),
     project_id: Optional[str] = Query(default=None, description="Filter by project"),
+    context: Optional[AuthContext] = Depends(get_auth_context),
 ):
-    datasets = _dataset_service.list_datasets(tag=tag, search=search, project_id=project_id)
+    if project_id:
+        _require_project_access(project_id, context)
+    datasets = _dataset_service.list_datasets(
+        tag=tag, search=search, project_id=project_id, workspace_id=context.workspace_id if context else None
+    )
     return DatasetsListResponse(
         datasets=[_dataset_to_response(d) for d in datasets]
     )
 
 
 @app.get("/datasets/{dataset_id}", response_model=DatasetDetailResponse)
-async def get_dataset(dataset_id: str):
+async def get_dataset(dataset_id: str, context: Optional[AuthContext] = Depends(get_auth_context)):
+    _require_dataset_access(dataset_id, context)
     dataset = _dataset_service.get_dataset(dataset_id)
-    if not dataset:
-        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
     return _dataset_to_detail(dataset)
 
 
 @app.post("/datasets", response_model=DatasetResponse, status_code=201)
-async def create_dataset(req: DatasetCreateRequest):
+async def create_dataset(req: DatasetCreateRequest, context: Optional[AuthContext] = Depends(get_auth_context)):
+    _require_role(context, WRITE_ROLES)
+    if context is not None:
+        if not req.project_id:
+            raise HTTPException(status_code=400, detail="Workspace datasets must be assigned to a project.")
+        _require_project_access(req.project_id, context, write=True)
     try:
         dataset = await asyncio.to_thread(
             _dataset_service.create_dataset,
@@ -532,7 +784,13 @@ async def upload_dataset(
     description: Optional[str] = Form(default=None, description="Dataset description"),
     tags: Optional[str] = Form(default=None, description="Comma-separated tags"),
     project_id: Optional[str] = Form(default=None, description="Project that owns this dataset"),
+    context: Optional[AuthContext] = Depends(get_auth_context),
 ):
+    _require_role(context, WRITE_ROLES)
+    if context is not None:
+        if not project_id:
+            raise HTTPException(status_code=400, detail="Workspace datasets must be assigned to a project.")
+        _require_project_access(project_id, context, write=True)
     file_content = await file.read()
     tag_list = [t.strip() for t in tags.split(",")] if tags else None
     try:
@@ -551,7 +809,9 @@ async def upload_dataset(
 
 
 @app.post("/datasets/{dataset_id}/versions", response_model=DatasetVersionResponse, status_code=201)
-async def add_dataset_version(dataset_id: str, req: DatasetAddVersionRequest):
+async def add_dataset_version(dataset_id: str, req: DatasetAddVersionRequest, context: Optional[AuthContext] = Depends(get_auth_context)):
+    if context is not None:
+        _require_dataset_access(dataset_id, context, write=True)
     try:
         version = await asyncio.to_thread(
             _dataset_service.add_version,
@@ -570,7 +830,9 @@ async def add_dataset_version(dataset_id: str, req: DatasetAddVersionRequest):
 
 
 @app.put("/datasets/{dataset_id}/active-version", response_model=DatasetVersionResponse)
-async def set_active_version(dataset_id: str, req: DatasetSetActiveVersionRequest):
+async def set_active_version(dataset_id: str, req: DatasetSetActiveVersionRequest, context: Optional[AuthContext] = Depends(get_auth_context)):
+    if context is not None:
+        _require_dataset_access(dataset_id, context, write=True)
     try:
         version = await asyncio.to_thread(
             _dataset_service.set_active_version,
@@ -589,7 +851,9 @@ async def set_active_version(dataset_id: str, req: DatasetSetActiveVersionReques
 
 
 @app.delete("/datasets/{dataset_id}", response_model=DatasetDeleteResponse)
-async def delete_dataset(dataset_id: str):
+async def delete_dataset(dataset_id: str, context: Optional[AuthContext] = Depends(get_auth_context)):
+    if context is not None:
+        _require_dataset_access(dataset_id, context, write=True)
     deleted = await asyncio.to_thread(_dataset_service.delete_dataset, dataset_id)
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
@@ -599,7 +863,12 @@ async def delete_dataset(dataset_id: str):
 # ── Pairwise Run Endpoints ──────────────────────────────────
 
 @app.post("/pairwise-runs", response_model=PairwiseRunResponse)
-async def create_pairwise_run(req: PairwiseRunRequest):
+async def create_pairwise_run(req: PairwiseRunRequest, context: Optional[AuthContext] = Depends(get_auth_context)):
+    _require_role(context, WRITE_ROLES)
+    if context is not None and req.dataset_path:
+        raise HTTPException(status_code=400, detail="Workspace runs must use a registered dataset_id.")
+    if req.dataset_id:
+        _require_dataset_access(req.dataset_id, context, write=True)
     examples = None
     if req.dataset_path:
         try:
@@ -607,14 +876,42 @@ async def create_pairwise_run(req: PairwiseRunRequest):
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Failed to load dataset: {e}")
 
+    async def resolve_connection(connection_id, provider, model, api_key, base_url, allow_unauthenticated, label):
+        if connection_id:
+            if context is None:
+                raise HTTPException(status_code=401, detail="Provider connections require workspace authentication")
+            try:
+                connection = await asyncio.to_thread(
+                    _provider_connection_service.resolve, context.workspace_id, connection_id
+                )
+            except ValueError as error:
+                raise HTTPException(status_code=400, detail=str(error))
+            return connection.provider, model or connection.default_model, connection.api_key, connection.base_url, connection.allow_unauthenticated
+        if context is not None and api_key:
+            raise HTTPException(status_code=400, detail=f"Store {label} credentials in a workspace provider connection.")
+        return provider, model, api_key, base_url, allow_unauthenticated
+
+    model_a_provider, model_a_model, model_a_api_key, model_a_base_url, model_a_allow_unauthenticated = await resolve_connection(
+        req.model_a_connection_id, req.model_a_provider, req.model_a_model, req.model_a_api_key,
+        req.model_a_base_url, req.model_a_allow_unauthenticated, "model A"
+    )
+    model_b_provider, model_b_model, model_b_api_key, model_b_base_url, model_b_allow_unauthenticated = await resolve_connection(
+        req.model_b_connection_id, req.model_b_provider, req.model_b_model, req.model_b_api_key,
+        req.model_b_base_url, req.model_b_allow_unauthenticated, "model B"
+    )
+    judge_provider_name, judge_model_name, judge_api_key, judge_base_url, judge_allow_unauthenticated = await resolve_connection(
+        req.judge_connection_id, req.judge_provider, req.judge_model, req.judge_api_key,
+        None, False, "judge"
+    )
+
     try:
         provider_a = await asyncio.to_thread(
             ProviderFactory.create,
-            provider=req.model_a_provider,
-            model_id=req.model_a_model,
-            api_key=req.model_a_api_key,
-            base_url=req.model_a_base_url,
-            allow_unauthenticated=req.model_a_allow_unauthenticated,
+            provider=model_a_provider,
+            model_id=model_a_model,
+            api_key=model_a_api_key,
+            base_url=model_a_base_url,
+            allow_unauthenticated=model_a_allow_unauthenticated,
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to create model A provider: {e}")
@@ -622,11 +919,11 @@ async def create_pairwise_run(req: PairwiseRunRequest):
     try:
         provider_b = await asyncio.to_thread(
             ProviderFactory.create,
-            provider=req.model_b_provider,
-            model_id=req.model_b_model,
-            api_key=req.model_b_api_key,
-            base_url=req.model_b_base_url,
-            allow_unauthenticated=req.model_b_allow_unauthenticated,
+            provider=model_b_provider,
+            model_id=model_b_model,
+            api_key=model_b_api_key,
+            base_url=model_b_base_url,
+            allow_unauthenticated=model_b_allow_unauthenticated,
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to create model B provider: {e}")
@@ -634,9 +931,11 @@ async def create_pairwise_run(req: PairwiseRunRequest):
     try:
         judge_provider = await asyncio.to_thread(
             ProviderFactory.create,
-            provider=req.judge_provider,
-            model_id=req.judge_model,
-            api_key=req.judge_api_key,
+            provider=judge_provider_name,
+            model_id=judge_model_name,
+            api_key=judge_api_key,
+            base_url=judge_base_url,
+            allow_unauthenticated=judge_allow_unauthenticated,
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to create judge provider: {e}")
@@ -652,20 +951,23 @@ async def create_pairwise_run(req: PairwiseRunRequest):
         concurrency_limit=req.concurrency,
         requested_configuration={
             "model_a": {
-                "provider": req.model_a_provider,
-                "model": req.model_a_model,
-                "base_url": req.model_a_base_url,
-                "allow_unauthenticated": req.model_a_allow_unauthenticated,
+                "provider": model_a_provider,
+                "model": model_a_model,
+                "connection_id": req.model_a_connection_id,
+                "base_url": model_a_base_url,
+                "allow_unauthenticated": model_a_allow_unauthenticated,
             },
             "model_b": {
-                "provider": req.model_b_provider,
-                "model": req.model_b_model,
-                "base_url": req.model_b_base_url,
-                "allow_unauthenticated": req.model_b_allow_unauthenticated,
+                "provider": model_b_provider,
+                "model": model_b_model,
+                "connection_id": req.model_b_connection_id,
+                "base_url": model_b_base_url,
+                "allow_unauthenticated": model_b_allow_unauthenticated,
             },
             "judge": {
-                "provider": req.judge_provider,
-                "model": req.judge_model,
+                "provider": judge_provider_name,
+                "model": judge_model_name,
+                "connection_id": req.judge_connection_id,
             },
             "judge_prompt_template": req.judge_prompt_template,
         },
@@ -709,7 +1011,8 @@ async def create_pairwise_run(req: PairwiseRunRequest):
 
 
 @app.get("/pairwise-runs/{run_id}", response_model=PairwiseRunStatusResponse)
-async def get_pairwise_run(run_id: str, include_comparisons: bool = Query(default=False)):
+async def get_pairwise_run(run_id: str, include_comparisons: bool = Query(default=False), context: Optional[AuthContext] = Depends(get_auth_context)):
+    _require_pairwise_run_access(run_id, context)
     with get_db() as db:
         run = db.query(PairwiseRunDB).filter(PairwiseRunDB.id == run_id).first()
         if not run:
@@ -772,9 +1075,12 @@ async def get_pairwise_run(run_id: str, include_comparisons: bool = Query(defaul
 
 
 @app.get("/pairwise-runs", response_model=PairwiseRunsListResponse)
-async def list_pairwise_runs():
+async def list_pairwise_runs(context: Optional[AuthContext] = Depends(get_auth_context)):
     with get_db() as db:
-        db_runs = db.query(PairwiseRunDB).order_by(PairwiseRunDB.created_at.desc()).all()
+        query = db.query(PairwiseRunDB)
+        if context is not None:
+            query = query.join(ProjectDB, PairwiseRunDB.project_id == ProjectDB.id).filter(ProjectDB.workspace_id == context.workspace_id)
+        db_runs = query.order_by(PairwiseRunDB.created_at.desc()).all()
         runs = [
             PairwiseRunListItem(
                 run_id=db_run.id,

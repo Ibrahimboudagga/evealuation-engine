@@ -23,7 +23,7 @@ DEMO_DATASETS = {
 
 
 class DemoSeedService:
-    def seed(self) -> dict[str, object]:
+    def seed(self, workspace_id: str | None = None) -> dict[str, object]:
         """Create the demo project and datasets once; safe to call repeatedly."""
         now = datetime.now(timezone.utc)
         with get_db() as db:
@@ -32,6 +32,7 @@ class DemoSeedService:
                 .filter(
                     ProjectDB.client_name == DEMO_CLIENT_NAME,
                     ProjectDB.name == DEMO_PROJECT_NAME,
+                    ProjectDB.workspace_id == workspace_id,
                 )
                 .first()
             )
@@ -41,6 +42,7 @@ class DemoSeedService:
                     name=DEMO_PROJECT_NAME,
                     client_name=DEMO_CLIENT_NAME,
                     description=DEMO_PROJECT_DESCRIPTION,
+                    workspace_id=workspace_id,
                     created_at=now,
                     updated_at=now,
                 )

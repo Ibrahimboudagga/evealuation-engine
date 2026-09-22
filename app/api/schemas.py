@@ -12,16 +12,18 @@ class RunRequest(BaseModel):
     dataset_id: Optional[str] = Field(default=None, description="Registered dataset ID")
     dataset_version_id: Optional[str] = Field(default=None, description="Immutable dataset version ID; defaults to the active version")
     dataset_path: Optional[str] = Field(default=None, description="Legacy server-side JSONL path")
-    candidate_provider: str = Field(..., description="Candidate provider name (e.g. openai, anthropic, cohere)")
-    candidate_model: str = Field(..., description="Candidate model ID / identifier")
+    candidate_connection_id: Optional[str] = Field(default=None, description="Workspace provider connection for candidate generation")
+    candidate_provider: Optional[str] = Field(default=None, description="Candidate provider name (e.g. openai, anthropic, cohere)")
+    candidate_model: Optional[str] = Field(default=None, description="Candidate model ID / identifier")
     candidate_api_key: Optional[str] = Field(default=None, description="Authentication key for the candidate provider")
     candidate_base_url: Optional[str] = Field(default=None, description="Custom API base URL for the candidate provider")
     candidate_allow_unauthenticated: bool = Field(
         default=False,
         description="Allow a keyless request only for an explicit compatible endpoint with a base URL",
     )
-    evaluator_provider: str = Field(..., description="Evaluator/judge provider name")
-    evaluator_model: str = Field(..., description="Evaluator/judge model ID / identifier")
+    evaluator_connection_id: Optional[str] = Field(default=None, description="Workspace provider connection for judging")
+    evaluator_provider: Optional[str] = Field(default=None, description="Evaluator/judge provider name")
+    evaluator_model: Optional[str] = Field(default=None, description="Evaluator/judge model ID / identifier")
     evaluator_api_key: Optional[str] = Field(default=None, description="Authentication key for the evaluator model")
     concurrency: int = Field(default=5, ge=1, le=50, description="Maximum parallel evaluations")
     judge_prompt_template: Optional[str] = Field(default=None, description="Optional custom judge prompt template text")
@@ -32,6 +34,10 @@ class RunRequest(BaseModel):
             raise ValueError("Provide exactly one of dataset_id or dataset_path.")
         if self.dataset_version_id and not self.dataset_id:
             raise ValueError("dataset_version_id requires dataset_id.")
+        if not self.candidate_connection_id and (not self.candidate_provider or not self.candidate_model):
+            raise ValueError("Provide candidate_connection_id or both candidate_provider and candidate_model.")
+        if not self.evaluator_connection_id and (not self.evaluator_provider or not self.evaluator_model):
+            raise ValueError("Provide evaluator_connection_id or both evaluator_provider and evaluator_model.")
         return self
 
 
@@ -40,6 +46,57 @@ class RunResponse(BaseModel):
     run_id: str = Field(..., description="Unique ID of the evaluation run")
     status: RunStatus = Field(default=RunStatus.QUEUED, description="Current lifecycle status")
     is_simulated: bool = Field(default=False, description="Whether any provider returned simulated output")
+
+
+# ── Workspace access and provider connection schemas ────────
+
+class WorkspaceBootstrapRequest(BaseModel):
+    email: str = Field(..., min_length=3, max_length=255)
+    display_name: str = Field(..., min_length=1, max_length=255)
+    workspace_name: str = Field(..., min_length=1, max_length=255)
+
+
+class WorkspaceBootstrapResponse(BaseModel):
+    user_id: str
+    workspace_id: str
+    role: Literal["owner"]
+    api_token: str = Field(..., description="Shown once; store it in a secret manager")
+
+
+class WorkspaceMemberCreateRequest(BaseModel):
+    email: str = Field(..., min_length=3, max_length=255)
+    display_name: str = Field(..., min_length=1, max_length=255)
+    role: Literal["owner", "editor", "viewer", "client_viewer"]
+
+
+class WorkspaceMemberResponse(BaseModel):
+    user_id: str
+    email: str
+    workspace_id: str
+    role: Literal["owner", "editor", "viewer", "client_viewer"]
+    api_token: Optional[str] = Field(default=None, description="Only returned for a newly created local user")
+
+
+class ProviderConnectionCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+    provider: str = Field(..., min_length=1, max_length=100)
+    default_model: str = Field(..., min_length=1, max_length=255)
+    api_key: Optional[str] = Field(default=None, description="Encrypted before it is persisted")
+    credential_reference: Optional[str] = Field(default=None, max_length=500)
+    base_url: Optional[str] = None
+    allow_unauthenticated: bool = False
+
+
+class ProviderConnectionResponse(BaseModel):
+    id: str
+    name: str
+    provider: str
+    default_model: str
+    base_url: Optional[str] = None
+    allow_unauthenticated: bool
+    credential_configured: bool
+    created_at: datetime
+    updated_at: datetime
 
 
 class EvaluatorMetric(BaseModel):
@@ -261,18 +318,21 @@ class PairwiseRunRequest(BaseModel):
     dataset_id: Optional[str] = Field(default=None, description="Registered dataset ID")
     dataset_version_id: Optional[str] = Field(default=None, description="Immutable dataset version ID; defaults to the active version")
     dataset_path: Optional[str] = Field(default=None, description="Legacy server-side JSONL path")
-    model_a_provider: str = Field(..., description="Model A provider name")
-    model_a_model: str = Field(..., description="Model A model ID")
+    model_a_connection_id: Optional[str] = Field(default=None, description="Workspace provider connection for model A")
+    model_a_provider: Optional[str] = Field(default=None, description="Model A provider name")
+    model_a_model: Optional[str] = Field(default=None, description="Model A model ID")
     model_a_api_key: Optional[str] = Field(default=None, description="Model A API key")
     model_a_base_url: Optional[str] = Field(default=None, description="Model A custom base URL")
     model_a_allow_unauthenticated: bool = Field(default=False, description="Allow a keyless compatible endpoint for model A")
-    model_b_provider: str = Field(..., description="Model B provider name")
-    model_b_model: str = Field(..., description="Model B model ID")
+    model_b_connection_id: Optional[str] = Field(default=None, description="Workspace provider connection for model B")
+    model_b_provider: Optional[str] = Field(default=None, description="Model B provider name")
+    model_b_model: Optional[str] = Field(default=None, description="Model B model ID")
     model_b_api_key: Optional[str] = Field(default=None, description="Model B API key")
     model_b_base_url: Optional[str] = Field(default=None, description="Model B custom base URL")
     model_b_allow_unauthenticated: bool = Field(default=False, description="Allow a keyless compatible endpoint for model B")
-    judge_provider: str = Field(..., description="Judge provider name")
-    judge_model: str = Field(..., description="Judge model ID")
+    judge_connection_id: Optional[str] = Field(default=None, description="Workspace provider connection for judge")
+    judge_provider: Optional[str] = Field(default=None, description="Judge provider name")
+    judge_model: Optional[str] = Field(default=None, description="Judge model ID")
     judge_api_key: Optional[str] = Field(default=None, description="Judge API key")
     judge_prompt_template: Optional[str] = Field(default=None, description="Custom pairwise judge prompt template")
     concurrency: int = Field(default=5, ge=1, le=50, description="Maximum parallel comparisons")
@@ -283,6 +343,13 @@ class PairwiseRunRequest(BaseModel):
             raise ValueError("Provide exactly one of dataset_id or dataset_path.")
         if self.dataset_version_id and not self.dataset_id:
             raise ValueError("dataset_version_id requires dataset_id.")
+        for label, connection_id, provider, model in (
+            ("model_a", self.model_a_connection_id, self.model_a_provider, self.model_a_model),
+            ("model_b", self.model_b_connection_id, self.model_b_provider, self.model_b_model),
+            ("judge", self.judge_connection_id, self.judge_provider, self.judge_model),
+        ):
+            if not connection_id and (not provider or not model):
+                raise ValueError(f"Provide {label}_connection_id or both {label}_provider and {label}_model.")
         return self
 
 

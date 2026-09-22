@@ -9,9 +9,12 @@ from app.database.models import DatasetDB, EvaluationRunDB, PairwiseRunDB, Proje
 
 
 class ProjectService:
-    def list_projects(self) -> List[ProjectDB]:
+    def list_projects(self, workspace_id: Optional[str] = None) -> List[ProjectDB]:
         with get_db() as db:
-            return db.query(ProjectDB).order_by(ProjectDB.client_name, ProjectDB.name).all()
+            query = db.query(ProjectDB)
+            if workspace_id is not None:
+                query = query.filter(ProjectDB.workspace_id == workspace_id)
+            return query.order_by(ProjectDB.client_name, ProjectDB.name).all()
 
     def get_project(self, project_id: str) -> Optional[ProjectDB]:
         with get_db() as db:
@@ -23,12 +26,14 @@ class ProjectService:
         client_name: str,
         description: Optional[str] = None,
         tags: Optional[List[str]] = None,
+        workspace_id: Optional[str] = None,
     ) -> ProjectDB:
         project = ProjectDB(
             id=str(uuid.uuid4()),
             name=name,
             client_name=client_name,
             description=description,
+            workspace_id=workspace_id,
             created_at=datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc),
         )

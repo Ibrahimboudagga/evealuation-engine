@@ -23,6 +23,7 @@ class DatasetService:
         tag: Optional[str] = None,
         search: Optional[str] = None,
         project_id: Optional[str] = None,
+        workspace_id: Optional[str] = None,
     ) -> List[DatasetDB]:
         """List all datasets with optional tag filter and name search."""
         with get_db() as db:
@@ -33,6 +34,10 @@ class DatasetService:
                 query = query.filter(DatasetDB.name.ilike(f"%{search}%"))
             if project_id:
                 query = query.filter(DatasetDB.project_id == project_id)
+            if workspace_id is not None:
+                query = query.join(ProjectDB, DatasetDB.project_id == ProjectDB.id).filter(
+                    ProjectDB.workspace_id == workspace_id
+                )
             return query.order_by(DatasetDB.created_at.desc()).all()
 
     def get_dataset(self, dataset_id: str) -> Optional[DatasetDB]:
