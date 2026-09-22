@@ -105,12 +105,13 @@ def test_migration_creates_a_fresh_database(tmp_path):
     _upgrade(database_path)
 
     inspector = inspect(create_engine(f"sqlite:///{database_path}"))
-    assert {"projects", "datasets", "dataset_versions", "evaluation_runs", "evaluation_results", "pairwise_runs", "pairwise_comparisons"} <= set(inspector.get_table_names())
+    assert {"workspaces", "users", "workspace_memberships", "provider_connections", "projects", "datasets", "dataset_versions", "evaluation_runs", "evaluation_results", "pairwise_runs", "pairwise_comparisons"} <= set(inspector.get_table_names())
     assert {column["name"] for column in inspector.get_columns("evaluation_results")} >= {"outcome", "error_message"}
     assert {column["name"] for column in inspector.get_columns("evaluation_runs")} >= {
         "run_configuration_json", "configuration_verified", "project_id", "is_baseline"
     }
     assert next(column for column in inspector.get_columns("evaluation_results") if column["name"] == "score")["nullable"]
+    assert "workspace_id" in {column["name"] for column in inspector.get_columns("projects")}
 
 
 def test_migration_preserves_copied_legacy_records_and_marks_them_unverified(tmp_path):

@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     google_api_key: Optional[str] = None
     cohere_api_key: Optional[str] = None
 
+    # Workspace credential encryption. Generate a Fernet key for production;
+    # provider connections cannot be created without it.
+    workspace_encryption_key: Optional[str] = None
+
     # Evaluation engine defaults
     default_candidate_provider: str = "mock"
     default_candidate_model: str = "mock"

@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 import json
 from typing import Any, Dict, List, Optional
-from sqlalchemy import String, Text, Float, DateTime, Integer, Boolean, ForeignKey
+from sqlalchemy import String, Text, Float, DateTime, Integer, Boolean, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from app.schemas.outcomes import EvaluationOutcome, RunStatus
@@ -9,6 +9,66 @@ from app.schemas.outcomes import EvaluationOutcome, RunStatus
 
 class Base(DeclarativeBase):
     pass
+
+
+class WorkspaceDB(Base):
+    __tablename__ = "workspaces"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    slug: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    memberships: Mapped[list["MembershipDB"]] = relationship(back_populates="workspace", cascade="all, delete-orphan")
+    projects: Mapped[list["ProjectDB"]] = relationship(back_populates="workspace")
+    provider_connections: Mapped[list["ProviderConnectionDB"]] = relationship(
+        back_populates="workspace", cascade="all, delete-orphan"
+    )
+
+
+class UserDB(Base):
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    api_token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    memberships: Mapped[list["MembershipDB"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+
+
+class MembershipDB(Base):
+    __tablename__ = "workspace_memberships"
+    __table_args__ = (UniqueConstraint("workspace_id", "user_id", name="uq_workspace_membership"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(36), ForeignKey("workspaces.id"), nullable=False)
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False)
+    role: Mapped[str] = mapped_column(String(30), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    workspace: Mapped[WorkspaceDB] = relationship(back_populates="memberships")
+    user: Mapped[UserDB] = relationship(back_populates="memberships")
+
+
+class ProviderConnectionDB(Base):
+    __tablename__ = "provider_connections"
+    __table_args__ = (UniqueConstraint("workspace_id", "name", name="uq_provider_connection_name"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(36), ForeignKey("workspaces.id"), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    provider: Mapped[str] = mapped_column(String(100), nullable=False)
+    default_model: Mapped[str] = mapped_column(String(255), nullable=False)
+    base_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    encrypted_api_key: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    credential_reference: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    allow_unauthenticated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    workspace: Mapped[WorkspaceDB] = relationship(back_populates="provider_connections")
 
 
 class ProjectDB(Base):
@@ -19,12 +79,14 @@ class ProjectDB(Base):
     client_name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     tags_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    workspace_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("workspaces.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     datasets: Mapped[list["DatasetDB"]] = relationship(back_populates="project")
     evaluation_runs: Mapped[list["EvaluationRunDB"]] = relationship(back_populates="project")
     pairwise_runs: Mapped[list["PairwiseRunDB"]] = relationship(back_populates="project")
+    workspace: Mapped[Optional[WorkspaceDB]] = relationship(back_populates="projects")
 
     @property
     def tags(self) -> List[str]:

@@ -6,6 +6,9 @@ from types import SimpleNamespace
 # evaluator has a token-overlap fallback, and tests that need embeddings stub
 # that dependency explicitly.
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
+# A stable test-only Fernet key permits provider-connection tests without
+# making application code fall back to an unsafe generated key.
+os.environ.setdefault("WORKSPACE_ENCRYPTION_KEY", "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
 
 import pytest
 from sqlalchemy import create_engine

@@ -1,5 +1,6 @@
 import gradio as gr
 import httpx
+import os
 import tempfile
 from pathlib import Path
 
@@ -8,15 +9,19 @@ API_BASE = "http://localhost:8000"
 PROVIDER_CHOICES = ["openai", "anthropic", "cohere", "gemini", "mock"]
 
 
+def _api_headers():
+    """Use the deployment's workspace token without placing it in Gradio state or outputs."""
+    token = os.getenv("WORKSPACE_API_TOKEN")
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
 async def submit_run(
     dataset_id,
     dataset_version_id,
-    candidate_provider,
+    candidate_connection_id,
     candidate_model,
-    candidate_api_key,
-    evaluator_provider,
+    evaluator_connection_id,
     evaluator_model,
-    evaluator_api_key,
     concurrency,
     judge_prompt_template,
 ):
@@ -25,17 +30,15 @@ async def submit_run(
     payload = {
         "dataset_id": dataset_id,
         "dataset_version_id": dataset_version_id,
-        "candidate_provider": candidate_provider,
-        "candidate_model": candidate_model,
-        "candidate_api_key": candidate_api_key or None,
-        "evaluator_provider": evaluator_provider,
-        "evaluator_model": evaluator_model,
-        "evaluator_api_key": evaluator_api_key or None,
+        "candidate_connection_id": candidate_connection_id,
+        "candidate_model": candidate_model or None,
+        "evaluator_connection_id": evaluator_connection_id,
+        "evaluator_model": evaluator_model or None,
         "concurrency": int(concurrency),
         "judge_prompt_template": judge_prompt_template or None,
     }
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=30.0, headers=_api_headers()) as client:
             resp = await client.post(f"{API_BASE}/runs", json=payload)
             resp.raise_for_status()
             data = resp.json()
@@ -52,7 +55,7 @@ async def get_run_status(run_id):
     if not run_id or not run_id.strip():
         return "Please enter a Run ID.", None, None
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, headers=_api_headers()) as client:
             resp = await client.get(f"{API_BASE}/runs/{run_id.strip()}")
             resp.raise_for_status()
             data = resp.json()
@@ -113,7 +116,7 @@ async def review_run_results(run_id, evaluator, outcomes, score_min, score_max):
         params.append(("score_max", score_max))
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=30.0, headers=_api_headers()) as client:
             response = await client.get(f"{API_BASE}/runs/{run_id.strip()}/results", params=params)
             response.raise_for_status()
         data = response.json()
@@ -178,7 +181,7 @@ async def export_run_report(run_id, report_format):
     if not run_id or not run_id.strip():
         return "Enter a Run ID before exporting.", None
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=60.0, headers=_api_headers()) as client:
             response = await client.get(
                 f"{API_BASE}/runs/{run_id.strip()}/export",
                 params={"format": report_format},
@@ -198,7 +201,7 @@ async def export_run_report(run_id, report_format):
 
 async def seed_agency_demo():
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=30.0, headers=_api_headers()) as client:
             response = await client.post(f"{API_BASE}/demo/seed")
             response.raise_for_status()
         return response.json()
@@ -210,7 +213,7 @@ async def seed_agency_demo():
 
 async def baseline_choice_update():
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, headers=_api_headers()) as client:
             response = await client.get(f"{API_BASE}/runs", params={"baseline_only": True})
             response.raise_for_status()
         choices = [
@@ -226,7 +229,7 @@ async def mark_run_as_baseline(run_id):
     if not run_id or not run_id.strip():
         return {"error": "Enter the completed Run ID to mark as a baseline."}
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, headers=_api_headers()) as client:
             response = await client.put(f"{API_BASE}/runs/{run_id.strip()}/baseline")
             response.raise_for_status()
         return response.json()
@@ -245,7 +248,7 @@ async def compare_run_with_baseline(run_id, baseline_run_id, coverage_minimum, m
         "exact_match_pass_rate_max_drop": max_pass_rate_drop,
     }
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=30.0, headers=_api_headers()) as client:
             response = await client.get(f"{API_BASE}/runs/{run_id.strip()}/comparison", params=params)
             response.raise_for_status()
         data = response.json()
@@ -260,17 +263,12 @@ async def compare_run_with_baseline(run_id, baseline_run_id, coverage_minimum, m
 async def submit_pairwise_run(
     dataset_id,
     dataset_version_id,
-    model_a_provider,
+    model_a_connection_id,
     model_a_model,
-    model_a_api_key,
-    model_a_base_url,
-    model_b_provider,
+    model_b_connection_id,
     model_b_model,
-    model_b_api_key,
-    model_b_base_url,
-    judge_provider,
+    judge_connection_id,
     judge_model,
-    judge_api_key,
     concurrency,
 ):
     if not dataset_id or not dataset_version_id:
@@ -278,21 +276,16 @@ async def submit_pairwise_run(
     payload = {
         "dataset_id": dataset_id,
         "dataset_version_id": dataset_version_id,
-        "model_a_provider": model_a_provider,
-        "model_a_model": model_a_model,
-        "model_a_api_key": model_a_api_key or None,
-        "model_a_base_url": model_a_base_url or None,
-        "model_b_provider": model_b_provider,
-        "model_b_model": model_b_model,
-        "model_b_api_key": model_b_api_key or None,
-        "model_b_base_url": model_b_base_url or None,
-        "judge_provider": judge_provider,
-        "judge_model": judge_model,
-        "judge_api_key": judge_api_key or None,
+        "model_a_connection_id": model_a_connection_id,
+        "model_a_model": model_a_model or None,
+        "model_b_connection_id": model_b_connection_id,
+        "model_b_model": model_b_model or None,
+        "judge_connection_id": judge_connection_id,
+        "judge_model": judge_model or None,
         "concurrency": int(concurrency),
     }
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=30.0, headers=_api_headers()) as client:
             resp = await client.post(f"{API_BASE}/pairwise-runs", json=payload)
             resp.raise_for_status()
             data = resp.json()
@@ -308,7 +301,7 @@ async def submit_pairwise_run(
 async def dataset_choice_update():
     """Return the current dataset choices for one dropdown."""
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, headers=_api_headers()) as client:
             response = await client.get(f"{API_BASE}/datasets")
             response.raise_for_status()
         datasets = response.json()["datasets"]
@@ -326,6 +319,36 @@ async def dataset_choice_update():
         return gr.update(choices=[], value=None)
 
 
+async def provider_connection_choice_update():
+    """Load safe connection labels; credentials never enter the browser UI."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0, headers=_api_headers()) as client:
+            response = await client.get(f"{API_BASE}/provider-connections")
+            response.raise_for_status()
+        choices = [
+            (f"{item['name']} — {item['provider']} / {item['default_model']}", item["id"])
+            for item in response.json()
+        ]
+        return gr.update(choices=choices, value=None)
+    except Exception:
+        return gr.update(choices=[], value=None)
+
+
+async def all_provider_connection_choice_updates():
+    update = await provider_connection_choice_update()
+    return update, update, update, update, update
+
+
+async def run_provider_connection_choice_updates():
+    update = await provider_connection_choice_update()
+    return update, update
+
+
+async def pairwise_provider_connection_choice_updates():
+    update = await provider_connection_choice_update()
+    return update, update, update
+
+
 async def all_dataset_choice_updates():
     update = await dataset_choice_update()
     return update, update, update
@@ -334,7 +357,7 @@ async def all_dataset_choice_updates():
 async def project_choice_update():
     """Return agency project choices for dataset creation."""
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, headers=_api_headers()) as client:
             response = await client.get(f"{API_BASE}/projects")
             response.raise_for_status()
         choices = [
@@ -356,10 +379,29 @@ async def create_project(name, client_name, description, tags):
         "tags": [tag.strip() for tag in tags.split(",") if tag.strip()] if tags else [],
     }
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, headers=_api_headers()) as client:
             response = await client.post(f"{API_BASE}/projects", json=payload)
             response.raise_for_status()
         return {"message": "Project created.", "project": response.json()}
+    except httpx.HTTPStatusError as error:
+        return {"error": f"HTTP {error.response.status_code}: {error.response.text}"}
+    except Exception as error:
+        return {"error": str(error)}
+
+
+async def create_provider_connection(name, provider, model, api_key, base_url, allow_unauthenticated):
+    if not name or not model:
+        return {"error": "Enter a connection name and default model."}
+    payload = {
+        "name": name.strip(), "provider": provider, "default_model": model.strip(),
+        "api_key": api_key or None, "base_url": base_url or None,
+        "allow_unauthenticated": bool(allow_unauthenticated),
+    }
+    try:
+        async with httpx.AsyncClient(timeout=15.0, headers=_api_headers()) as client:
+            response = await client.post(f"{API_BASE}/provider-connections", json=payload)
+            response.raise_for_status()
+        return {"message": "Provider connection saved. Its credential cannot be retrieved.", "connection": response.json()}
     except httpx.HTTPStatusError as error:
         return {"error": f"HTTP {error.response.status_code}: {error.response.text}"}
     except Exception as error:
@@ -370,7 +412,7 @@ async def refresh_version_choices(dataset_id):
     if not dataset_id:
         return gr.update(choices=[], value=None)
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, headers=_api_headers()) as client:
             response = await client.get(f"{API_BASE}/datasets/{dataset_id}")
             response.raise_for_status()
         dataset = response.json()
@@ -395,7 +437,7 @@ async def upload_dataset(file_path, name, description, tags, project_id):
     dataset_name = name.strip() if name and name.strip() else path.stem
     try:
         file_content = path.read_bytes()
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=30.0, headers=_api_headers()) as client:
             response = await client.post(
                 f"{API_BASE}/datasets/upload",
                 data={
@@ -419,7 +461,7 @@ async def add_dataset_version(dataset_id, file_path):
         return {"error": "Select a dataset and a .jsonl file for the new version."}
     try:
         content = Path(file_path).read_text(encoding="utf-8")
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=30.0, headers=_api_headers()) as client:
             response = await client.post(
                 f"{API_BASE}/datasets/{dataset_id}/versions",
                 json={"content": content},
@@ -438,7 +480,7 @@ async def set_active_dataset_version(dataset_id, version_id):
     if not dataset_id or not version_id:
         return {"error": "Select a dataset and version."}
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, headers=_api_headers()) as client:
             response = await client.put(
                 f"{API_BASE}/datasets/{dataset_id}/active-version",
                 json={"version_id": version_id},
@@ -455,7 +497,7 @@ async def get_pairwise_status(run_id):
     if not run_id or not run_id.strip():
         return "Please enter a Run ID.", None, None, None
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, headers=_api_headers()) as client:
             resp = await client.get(
                 f"{API_BASE}/pairwise-runs/{run_id.strip()}",
                 params={"include_comparisons": True},
@@ -519,6 +561,25 @@ async def get_pairwise_status(run_id):
 
 with gr.Blocks(title="LLM Evaluation Engine") as demo:
     gr.Markdown("# LLM Evaluation Engine")
+
+    with gr.Tab("Provider Connections"):
+        gr.Markdown("Workspace owners configure a provider once. The credential is encrypted by the API and is never returned to the browser, reports, or other members.")
+        with gr.Row():
+            with gr.Column():
+                connection_name = gr.Textbox(label="Connection Name")
+                connection_provider = gr.Dropdown(choices=PROVIDER_CHOICES, label="Provider", value="openai")
+                connection_model = gr.Textbox(label="Default Model", value="gpt-4o")
+                connection_api_key = gr.Textbox(label="API Key", type="password")
+                connection_base_url = gr.Textbox(label="Compatible Endpoint Base URL (optional)")
+                connection_unauthenticated = gr.Checkbox(label="Intentional unauthenticated endpoint", value=False)
+                connection_save_button = gr.Button("Save Provider Connection", variant="primary")
+            with gr.Column():
+                connection_output = gr.JSON(label="Connection Result")
+        connection_save_button.click(
+            fn=create_provider_connection,
+            inputs=[connection_name, connection_provider, connection_model, connection_api_key, connection_base_url, connection_unauthenticated],
+            outputs=connection_output,
+        )
 
     with gr.Tab("Projects"):
         gr.Markdown("Create a workspace for each client product before uploading its evaluation datasets. Seed the mock-only demo to start a credential-free walkthrough.")
@@ -592,20 +653,18 @@ with gr.Blocks(title="LLM Evaluation Engine") as demo:
     ).then(fn=dataset_choice_update, outputs=manage_dataset)
 
     with gr.Tab("Run Evaluation"):
-        gr.Markdown("Choose a stored dataset version and configure a new evaluation run.")
+        gr.Markdown("Choose a stored dataset version and workspace provider connections. Credentials are configured once by an owner and never entered here.")
         with gr.Row():
             with gr.Column():
                 dataset_id = gr.Dropdown(label="Dataset", choices=[])
                 refresh_run_datasets = gr.Button("Refresh Datasets")
                 dataset_version_id = gr.Dropdown(label="Dataset Version", choices=[])
-                candidate_provider = gr.Dropdown(choices=PROVIDER_CHOICES, label="Candidate Provider", value="openai")
-                candidate_model = gr.Textbox(label="Candidate Model", value="gpt-4o")
-                candidate_api_key = gr.Textbox(label="Candidate API Key", type="password")
+                candidate_connection = gr.Dropdown(label="Candidate Provider Connection", choices=[])
+                candidate_model = gr.Textbox(label="Candidate Model Override (optional)")
                 concurrency = gr.Slider(minimum=1, maximum=20, value=5, step=1, label="Concurrency")
             with gr.Column():
-                evaluator_provider = gr.Dropdown(choices=PROVIDER_CHOICES, label="Evaluator Provider", value="openai")
-                evaluator_model = gr.Textbox(label="Evaluator Model", value="gpt-4o")
-                evaluator_api_key = gr.Textbox(label="Evaluator API Key", type="password")
+                evaluator_connection = gr.Dropdown(label="Judge Provider Connection", choices=[])
+                evaluator_model = gr.Textbox(label="Judge Model Override (optional)")
                 judge_prompt_template = gr.Textbox(
                     label="Judge Prompt Template (optional)",
                     lines=4,
@@ -620,18 +679,17 @@ with gr.Blocks(title="LLM Evaluation Engine") as demo:
             inputs=[
                 dataset_id,
                 dataset_version_id,
-                candidate_provider,
+                candidate_connection,
                 candidate_model,
-                candidate_api_key,
-                evaluator_provider,
+                evaluator_connection,
                 evaluator_model,
-                evaluator_api_key,
                 concurrency,
                 judge_prompt_template,
             ],
             outputs=run_output,
         )
         refresh_run_datasets.click(fn=dataset_choice_update, outputs=dataset_id)
+        refresh_run_datasets.click(fn=run_provider_connection_choice_updates, outputs=[candidate_connection, evaluator_connection])
         dataset_id.change(fn=refresh_version_choices, inputs=dataset_id, outputs=dataset_version_id)
 
     with gr.Tab("View Results"):
@@ -744,21 +802,16 @@ with gr.Blocks(title="LLM Evaluation Engine") as demo:
                 pw_dataset_id = gr.Dropdown(label="Dataset", choices=[])
                 pw_refresh_datasets = gr.Button("Refresh Datasets")
                 pw_dataset_version_id = gr.Dropdown(label="Dataset Version", choices=[])
-                pw_model_a_provider = gr.Dropdown(choices=PROVIDER_CHOICES, label="Provider", value="openai")
-                pw_model_a_model = gr.Textbox(label="Model", value="gpt-4o")
-                pw_model_a_api_key = gr.Textbox(label="API Key", type="password")
-                pw_model_a_base_url = gr.Textbox(label="Base URL (optional)")
+                pw_model_a_connection = gr.Dropdown(label="Provider Connection", choices=[])
+                pw_model_a_model = gr.Textbox(label="Model Override (optional)")
                 pw_concurrency = gr.Slider(minimum=1, maximum=20, value=5, step=1, label="Concurrency")
             with gr.Column():
                 gr.Markdown("### Model B")
-                pw_model_b_provider = gr.Dropdown(choices=PROVIDER_CHOICES, label="Provider", value="openai")
-                pw_model_b_model = gr.Textbox(label="Model", value="gpt-4o-mini")
-                pw_model_b_api_key = gr.Textbox(label="API Key", type="password")
-                pw_model_b_base_url = gr.Textbox(label="Base URL (optional)")
+                pw_model_b_connection = gr.Dropdown(label="Provider Connection", choices=[])
+                pw_model_b_model = gr.Textbox(label="Model Override (optional)")
                 gr.Markdown("### Judge")
-                pw_judge_provider = gr.Dropdown(choices=PROVIDER_CHOICES, label="Judge Provider", value="openai")
-                pw_judge_model = gr.Textbox(label="Judge Model", value="gpt-4o")
-                pw_judge_api_key = gr.Textbox(label="Judge API Key", type="password")
+                pw_judge_connection = gr.Dropdown(label="Judge Provider Connection", choices=[])
+                pw_judge_model = gr.Textbox(label="Judge Model Override (optional)")
 
         pw_submit_btn = gr.Button("Submit Pairwise Run", variant="primary")
         pw_run_output = gr.JSON(label="Pairwise Run Response")
@@ -768,27 +821,30 @@ with gr.Blocks(title="LLM Evaluation Engine") as demo:
             inputs=[
                 pw_dataset_id,
                 pw_dataset_version_id,
-                pw_model_a_provider,
+                pw_model_a_connection,
                 pw_model_a_model,
-                pw_model_a_api_key,
-                pw_model_a_base_url,
-                pw_model_b_provider,
+                pw_model_b_connection,
                 pw_model_b_model,
-                pw_model_b_api_key,
-                pw_model_b_base_url,
-                pw_judge_provider,
+                pw_judge_connection,
                 pw_judge_model,
-                pw_judge_api_key,
                 pw_concurrency,
             ],
             outputs=pw_run_output,
         )
         pw_refresh_datasets.click(fn=dataset_choice_update, outputs=pw_dataset_id)
+        pw_refresh_datasets.click(
+            fn=pairwise_provider_connection_choice_updates,
+            outputs=[pw_model_a_connection, pw_model_b_connection, pw_judge_connection],
+        )
         pw_dataset_id.change(fn=refresh_version_choices, inputs=pw_dataset_id, outputs=pw_dataset_version_id)
 
     demo.load(
         fn=all_dataset_choice_updates,
         outputs=[manage_dataset, dataset_id, pw_dataset_id],
+    )
+    demo.load(
+        fn=all_provider_connection_choice_updates,
+        outputs=[candidate_connection, evaluator_connection, pw_model_a_connection, pw_model_b_connection, pw_judge_connection],
     )
     demo.load(fn=project_choice_update, outputs=upload_project)
 

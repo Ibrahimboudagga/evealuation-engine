@@ -100,6 +100,18 @@ Copy-Item .env.example .env
 
 Edit `.env` and fill in API keys for the providers you intend to use. Missing credentials stop the request with a configuration error. Use the explicit `mock` provider or `mock` model for demo mode; simulated runs are marked in the API and UI.
 
+### Agency workspaces and provider connections
+
+Before serving multiple agency users, generate and set `WORKSPACE_ENCRYPTION_KEY`, then bootstrap the first owner once:
+
+```bash
+curl -X POST http://localhost:8000/auth/bootstrap -H "Content-Type: application/json" -d "{\"email\":\"owner@example.com\",\"display_name\":\"Owner\",\"workspace_name\":\"Acme Agency\"}"
+```
+
+Store the returned `api_token` in a secret manager. API requests then use `Authorization: Bearer <token>`; set `WORKSPACE_API_TOKEN` for the local Gradio process and restart it. Owners can add `owner`, `editor`, `viewer`, or `client_viewer` memberships through `POST /workspace/members`. Projects, their datasets, runs, results, exports, and release checks are workspace-scoped.
+
+Owners save a provider once using `POST /provider-connections` or the **Provider Connections** Gradio tab. The API encrypts an API key with Fernet, never returns it, and stores only a connection ID in the run configuration and reports. Workspace runs select connection IDs instead of submitting raw keys. `credential_reference` is supported as a stored reference; resolving one requires an external secret resolver in the deployment.
+
 ### 3. Run the CLI
 
 ```bash
