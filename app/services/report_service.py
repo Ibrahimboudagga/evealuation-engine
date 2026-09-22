@@ -201,13 +201,15 @@ th, td {{ border: 1px solid #d6deea; padding: 8px; text-align: left; vertical-al
 th {{ background: #eaf1f8; }} pre {{ white-space: pre-wrap; margin: 0; font-family: inherit; }}
 @media print {{ body {{ margin: 16px; }} }}
 </style></head><body>
-<h1>Evaluation Summary</h1>
+<h1>{text((report.get('sharing') or {}).get('branding', {}).get('agency_name') or 'Evaluation Summary')}</h1>
+<p><strong>{text((report.get('sharing') or {}).get('branding', {}).get('report_title') or 'Evaluation Summary')}</strong></p>
 <p>Generated {text(report['generated_at'])}. This report uses persisted run data; errors are redacted.</p>
 <div class="meta"><strong>Run:</strong> {text(run['id'])}<br><strong>Model:</strong> {text(run['model_name'])}<br>
 <strong>Status:</strong> {text(run['status'])}<br><strong>Simulated:</strong> {text(run['is_simulated'])}<br>
 <strong>Project:</strong> {text(run['project']['client_name'] + ' / ' + run['project']['name'] if run['project'] else None)}</div>
 <h2>Coverage and Quality</h2><table><thead><tr><th>Evaluator</th><th>Total</th><th>Valid</th><th>Coverage</th><th>Average score</th><th>Pass rate</th><th>Generation errors</th><th>Evaluation errors</th></tr></thead><tbody>{metric_rows}</tbody></table>
 <h2>Failure Counts</h2><div class="summary">Examples: {text(counts['total_examples'])} &nbsp; | &nbsp; Generation errors: {text(counts['generation_errors'])} &nbsp; | &nbsp; Evaluation errors: {text(counts['evaluation_errors'])} &nbsp; | &nbsp; Affected examples: {text(counts['failed_examples'])}</div>
+<h2>Baseline Outcome</h2><div class="summary">{text((report.get('baseline_outcome') or {}).get('status'))}: {text(' '.join((report.get('baseline_outcome') or {}).get('reasons', [])))}</div>
 <h2>Example-level Failures</h2><table><thead><tr><th>Example</th><th>Evaluator</th><th>Outcome</th><th>Prompt</th><th>Output</th><th>Expected answer</th><th>Judge explanation</th><th>Sanitized error</th></tr></thead><tbody>{failure_rows}</tbody></table>
 <h2>Run Configuration</h2><p>Configuration verified: {text(run['configuration_verified'])}</p><pre class="meta">{configuration}</pre>
 </body></html>"""

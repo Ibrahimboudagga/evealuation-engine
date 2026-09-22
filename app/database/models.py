@@ -24,6 +24,12 @@ class WorkspaceDB(Base):
     provider_connections: Mapped[list["ProviderConnectionDB"]] = relationship(
         back_populates="workspace", cascade="all, delete-orphan"
     )
+    evaluation_templates: Mapped[list["EvaluationTemplateDB"]] = relationship(
+        back_populates="workspace", cascade="all, delete-orphan"
+    )
+    report_shares: Mapped[list["ReportShareDB"]] = relationship(
+        back_populates="workspace", cascade="all, delete-orphan"
+    )
 
 
 class UserDB(Base):
@@ -69,6 +75,61 @@ class ProviderConnectionDB(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     workspace: Mapped[WorkspaceDB] = relationship(back_populates="provider_connections")
+
+
+class EvaluationTemplateDB(Base):
+    __tablename__ = "evaluation_templates"
+    __table_args__ = (UniqueConstraint("workspace_id", "name", name="uq_evaluation_template_name"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(36), ForeignKey("workspaces.id"), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    settings_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    workspace: Mapped[WorkspaceDB] = relationship(back_populates="evaluation_templates")
+
+    @property
+    def settings(self) -> Dict[str, Any]:
+        try:
+            return json.loads(self.settings_json)
+        except json.JSONDecodeError:
+            return {}
+
+    @settings.setter
+    def settings(self, value: Dict[str, Any]) -> None:
+        self.settings_json = json.dumps(value)
+
+
+class ReportShareDB(Base):
+    __tablename__ = "report_shares"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(36), ForeignKey("workspaces.id"), nullable=False)
+    project_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("projects.id"), nullable=True)
+    run_id: Mapped[Optional[str]] = mapped_column(String(255), ForeignKey("evaluation_runs.id"), nullable=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    branding_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    workspace: Mapped[WorkspaceDB] = relationship(back_populates="report_shares")
+    project: Mapped[Optional["ProjectDB"]] = relationship()
+    run: Mapped[Optional["EvaluationRunDB"]] = relationship()
+
+    @property
+    def branding(self) -> Dict[str, Any]:
+        try:
+            return json.loads(self.branding_json or "{}")
+        except json.JSONDecodeError:
+            return {}
+
+    @branding.setter
+    def branding(self, value: Optional[Dict[str, Any]]) -> None:
+        self.branding_json = json.dumps(value or {})
 
 
 class ProjectDB(Base):

@@ -2,7 +2,7 @@ import asyncio
 import structlog
 from typing import Literal, Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException, UploadFile, File, Form, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, UploadFile, File, Form, Query, Request
 from fastapi.responses import Response
 
 from app.api.schemas import (
@@ -14,6 +14,12 @@ from app.api.schemas import (
     WorkspaceMemberResponse,
     ProviderConnectionCreateRequest,
     ProviderConnectionResponse,
+    EvaluationTemplateCreateRequest,
+    EvaluationTemplateResponse,
+    TemplateLaunchRequest,
+    ReportShareCreateRequest,
+    ReportShareResponse,
+    ProjectDashboardResponse,
     RunStatusResponse,
     RunListItem,
     RunsListResponse,
@@ -63,6 +69,7 @@ from app.services.project_service import ProjectService
 from app.services.report_service import ReportService
 from app.services.identity_service import AuthContext, IdentityService, OWNER_ROLES, WRITE_ROLES
 from app.services.provider_connection_service import ProviderConnectionService
+from app.services.agency_service import AgencyService
 from app.services.run_recovery import reconcile_abandoned_runs
 from app.schemas.outcomes import EvaluationOutcome, RunStatus
 
@@ -79,6 +86,7 @@ _baseline_service = BaselineService()
 _demo_seed_service = DemoSeedService()
 _identity_service = IdentityService()
 _provider_connection_service = ProviderConnectionService()
+_agency_service = AgencyService()
 
 
 async def get_auth_context(
@@ -165,6 +173,20 @@ def _connection_to_response(connection) -> ProviderConnectionResponse:
         credential_configured=bool(connection.encrypted_api_key or connection.credential_reference),
         created_at=connection.created_at,
         updated_at=connection.updated_at,
+    )
+
+
+def _template_to_response(template) -> EvaluationTemplateResponse:
+    return EvaluationTemplateResponse(
+        id=template.id, name=template.name, description=template.description,
+        created_at=template.created_at, updated_at=template.updated_at, **template.settings,
+    )
+
+
+def _share_to_response(share, url: Optional[str] = None) -> ReportShareResponse:
+    return ReportShareResponse(
+        id=share.id, project_id=share.project_id, run_id=share.run_id,
+        expires_at=share.expires_at, revoked_at=share.revoked_at, url=url,
     )
 
 
@@ -322,6 +344,107 @@ async def delete_provider_connection(
     return Response(status_code=204)
 
 
+@app.get("/evaluation-templates", response_model=list[EvaluationTemplateResponse])
+async def list_evaluation_templates(context: Optional[AuthContext] = Depends(get_auth_context)):
+    if context is None:
+        raise HTTPException(status_code=401, detail="Workspace authentication is required")
+    templates = await asyncio.to_thread(_agency_service.list_templates, context.workspace_id)
+    return [_template_to_response(template) for template in templates]
+
+
+@app.post("/evaluation-templates", response_model=EvaluationTemplateResponse, status_code=201)
+async def create_evaluation_template(
+    req: EvaluationTemplateCreateRequest,
+    context: Optional[AuthContext] = Depends(get_auth_context),
+):
+    if context is None:
+        raise HTTPException(status_code=401, detail="Workspace authentication is required")
+    _require_role(context, WRITE_ROLES)
+    for connection_id in (req.candidate_connection_id, req.evaluator_connection_id):
+        try:
+            await asyncio.to_thread(_provider_connection_service.resolve, context.workspace_id, connection_id)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error))
+    try:
+        template = await asyncio.to_thread(_agency_service.create_template, context.workspace_id, req.model_dump())
+    except Exception as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    return _template_to_response(template)
+
+
+@app.delete("/evaluation-templates/{template_id}", status_code=204)
+async def delete_evaluation_template(template_id: str, context: Optional[AuthContext] = Depends(get_auth_context)):
+    if context is None:
+        raise HTTPException(status_code=401, detail="Workspace authentication is required")
+    _require_role(context, WRITE_ROLES)
+    if not await asyncio.to_thread(_agency_service.delete_template, context.workspace_id, template_id):
+        raise HTTPException(status_code=404, detail="Evaluation template not found")
+    return Response(status_code=204)
+
+
+@app.post("/evaluation-templates/{template_id}/launch", response_model=RunResponse)
+async def launch_evaluation_template(
+    template_id: str,
+    req: TemplateLaunchRequest,
+    context: Optional[AuthContext] = Depends(get_auth_context),
+):
+    if context is None:
+        raise HTTPException(status_code=401, detail="Workspace authentication is required")
+    _require_role(context, WRITE_ROLES)
+    template = await asyncio.to_thread(_agency_service.get_template, context.workspace_id, template_id)
+    if not template:
+        raise HTTPException(status_code=404, detail="Evaluation template not found")
+    payload = {
+        **template.settings,
+        "dataset_id": req.dataset_id,
+        "dataset_version_id": req.dataset_version_id,
+        "release_rules": {
+            "coverage_minimum": template.settings.get("coverage_minimum"),
+            "exact_match_pass_rate_max_drop": template.settings.get("exact_match_pass_rate_max_drop"),
+        },
+    }
+    return await create_run(RunRequest(**payload), context)
+
+
+@app.post("/report-shares", response_model=ReportShareResponse, status_code=201)
+async def create_report_share(
+    req: ReportShareCreateRequest,
+    request: Request,
+    context: Optional[AuthContext] = Depends(get_auth_context),
+):
+    if context is None:
+        raise HTTPException(status_code=401, detail="Workspace authentication is required")
+    _require_role(context, WRITE_ROLES)
+    try:
+        share, token = await asyncio.to_thread(
+            _agency_service.create_share, context.workspace_id, req.run_id, req.project_id,
+            req.expires_in_hours, req.branding,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    return _share_to_response(share, f"{str(request.base_url).rstrip('/')}/shared-reports/{token}")
+
+
+@app.delete("/report-shares/{share_id}", status_code=204)
+async def revoke_report_share(share_id: str, context: Optional[AuthContext] = Depends(get_auth_context)):
+    if context is None:
+        raise HTTPException(status_code=401, detail="Workspace authentication is required")
+    _require_role(context, WRITE_ROLES)
+    if not await asyncio.to_thread(_agency_service.revoke_share, context.workspace_id, share_id):
+        raise HTTPException(status_code=404, detail="Report share not found")
+    return Response(status_code=204)
+
+
+@app.get("/shared-reports/{token}")
+async def get_shared_report(token: str):
+    """Public, read-only HTML. The random token is the sole access capability."""
+    try:
+        report, _ = await asyncio.to_thread(_agency_service.public_report, token)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error))
+    return Response(content=_report_service.to_html(report), media_type="text/html")
+
+
 @app.post("/demo/seed", response_model=DemoSeedResponse)
 async def seed_agency_demo(context: Optional[AuthContext] = Depends(get_auth_context)):
     """Create an idempotent mock-only demo workspace with sample datasets."""
@@ -421,6 +544,7 @@ async def create_run(req: RunRequest, context: Optional[AuthContext] = Depends(g
         provider=candidate_provider,
         registry=registry,
         concurrency_limit=req.concurrency,
+        execution_timeout_seconds=req.timeout_seconds,
         requested_configuration={
             "candidate": {
                 "provider": candidate_provider_name,
@@ -435,6 +559,9 @@ async def create_run(req: RunRequest, context: Optional[AuthContext] = Depends(g
                 "connection_id": req.evaluator_connection_id,
             },
             "judge_prompt_template": req.judge_prompt_template,
+            "template_execution": {"timeout_seconds": req.timeout_seconds},
+            "release_rules": req.release_rules,
+            "report_preferences": req.report_preferences,
         },
     )
 
@@ -693,6 +820,19 @@ async def list_projects(context: Optional[AuthContext] = Depends(get_auth_contex
 async def get_project(project_id: str, context: Optional[AuthContext] = Depends(get_auth_context)):
     project = _require_project_access(project_id, context)
     return _project_to_response(project)
+
+
+@app.get("/projects/{project_id}/dashboard", response_model=ProjectDashboardResponse)
+async def get_project_dashboard(project_id: str, context: Optional[AuthContext] = Depends(get_auth_context)):
+    if context is None:
+        raise HTTPException(status_code=401, detail="Workspace authentication is required")
+    _require_project_access(project_id, context)
+    try:
+        return ProjectDashboardResponse(**(await asyncio.to_thread(
+            _agency_service.project_dashboard, context.workspace_id, project_id
+        )))
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error))
 
 
 @app.post("/projects", response_model=ProjectResponse, status_code=201)
