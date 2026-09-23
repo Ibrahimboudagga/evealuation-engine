@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from app.database.connection import get_db
-from app.database.models import MembershipDB, ProjectDB, UserDB, UserSessionDB, WorkspaceDB
+from app.database.models import MembershipDB, ProjectAccessDB, ProjectDB, UserDB, UserSessionDB, WorkspaceDB
 
 
 ROLE_OWNER = "owner"
@@ -61,6 +61,34 @@ def _verify_password(password: str, encoded: Optional[str]) -> bool:
 
 
 class IdentityService:
+    def members(self, workspace_id: str):
+        with get_db() as db:
+            members = db.query(MembershipDB).filter(MembershipDB.workspace_id == workspace_id).all()
+            for member in members:
+                _ = member.user.email
+            return members
+
+    def update_member_role(self, workspace_id: str, user_id: str, role: str) -> bool:
+        with get_db() as db:
+            item = db.query(MembershipDB).filter(MembershipDB.workspace_id == workspace_id, MembershipDB.user_id == user_id).first()
+            if not item or role not in VALID_ROLES: return False
+            item.role = role; db.commit(); return True
+
+    def remove_member(self, workspace_id: str, user_id: str) -> bool:
+        with get_db() as db:
+            item = db.query(MembershipDB).filter(MembershipDB.workspace_id == workspace_id, MembershipDB.user_id == user_id).first()
+            if not item: return False
+            db.delete(item); db.commit(); return True
+
+    def grant_project_access(self, workspace_id: str, user_id: str, project_id: str) -> bool:
+        with get_db() as db:
+            member = db.query(MembershipDB).filter(MembershipDB.workspace_id == workspace_id, MembershipDB.user_id == user_id).first()
+            project = db.query(ProjectDB).filter(ProjectDB.id == project_id, ProjectDB.workspace_id == workspace_id).first()
+            if not member or not project: return False
+            if not db.query(ProjectAccessDB).filter(ProjectAccessDB.membership_id == member.id, ProjectAccessDB.project_id == project_id).first():
+                db.add(ProjectAccessDB(id=str(uuid.uuid4()), membership_id=member.id, project_id=project_id, created_at=_now()))
+                db.commit()
+            return True
     def bootstrap(self, email: str, display_name: str, workspace_name: str, password: Optional[str] = None) -> tuple[AuthContext, str]:
         """Create the initial owner and workspace; the token is returned only once."""
         with get_db() as db:
