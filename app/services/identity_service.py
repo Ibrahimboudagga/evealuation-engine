@@ -5,11 +5,11 @@ import re
 import secrets
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from app.database.connection import get_db
-from app.database.models import MembershipDB, ProjectDB, UserDB, WorkspaceDB
+from app.database.models import MembershipDB, ProjectDB, UserDB, UserSessionDB, WorkspaceDB
 
 
 ROLE_OWNER = "owner"
@@ -38,20 +38,43 @@ def _slug(value: str) -> str:
     return normalized[:100] or "workspace"
 
 
+def _now() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _password_hash(password: str, salt: Optional[str] = None) -> str:
+    if len(password) < 12:
+        raise ValueError("Password must contain at least 12 characters.")
+    salt = salt or secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 600_000).hex()
+    return f"pbkdf2_sha256$600000${salt}${digest}"
+
+
+def _verify_password(password: str, encoded: Optional[str]) -> bool:
+    if not encoded:
+        return False
+    try:
+        _, _, salt, _ = encoded.split("$", 3)
+        return secrets.compare_digest(_password_hash(password, salt), encoded)
+    except ValueError:
+        return False
+
+
 class IdentityService:
-    def bootstrap(self, email: str, display_name: str, workspace_name: str) -> tuple[AuthContext, str]:
+    def bootstrap(self, email: str, display_name: str, workspace_name: str, password: Optional[str] = None) -> tuple[AuthContext, str]:
         """Create the initial owner and workspace; the token is returned only once."""
         with get_db() as db:
             if db.query(UserDB.id).first():
                 raise ValueError("An owner already exists. Use a workspace membership endpoint instead.")
             token = secrets.token_urlsafe(32)
-            now = datetime.now(timezone.utc)
+            now = _now()
             workspace = WorkspaceDB(id=str(uuid.uuid4()), name=workspace_name, slug=_slug(workspace_name), created_at=now)
             user = UserDB(
                 id=str(uuid.uuid4()),
                 email=email.lower().strip(),
                 display_name=display_name.strip(),
                 api_token_hash=_token_hash(token),
+                password_hash=_password_hash(password) if password else None,
                 created_at=now,
             )
             membership = MembershipDB(
@@ -71,7 +94,10 @@ class IdentityService:
 
     def authenticate(self, token: str, workspace_id: Optional[str] = None) -> AuthContext:
         with get_db() as db:
-            user = db.query(UserDB).filter(UserDB.api_token_hash == _token_hash(token)).first()
+            session = db.query(UserSessionDB).filter(UserSessionDB.token_hash == _token_hash(token)).first()
+            if session and (session.revoked_at is not None or session.expires_at <= _now()):
+                raise ValueError("Session has expired. Sign in again.")
+            user = session.user if session else db.query(UserDB).filter(UserDB.api_token_hash == _token_hash(token)).first()
             if not user:
                 raise ValueError("Invalid API token")
             memberships = db.query(MembershipDB).filter(MembershipDB.user_id == user.id).all()
@@ -87,11 +113,46 @@ class IdentityService:
                 raise ValueError("X-Workspace-ID is required when a user belongs to multiple workspaces")
             return AuthContext(user.id, user.email, membership.workspace_id, membership.role)
 
+    def sign_in(self, email: str, password: str, workspace_id: Optional[str] = None) -> tuple[AuthContext, str, datetime]:
+        with get_db() as db:
+            user = db.query(UserDB).filter(UserDB.email == email.lower().strip()).first()
+            if not user or not _verify_password(password, user.password_hash):
+                raise ValueError("Invalid email or password")
+            memberships = db.query(MembershipDB).filter(MembershipDB.user_id == user.id).all()
+            if workspace_id:
+                membership = next((item for item in memberships if item.workspace_id == workspace_id), None)
+            elif len(memberships) == 1:
+                membership = memberships[0]
+            else:
+                membership = None
+            if not membership:
+                raise ValueError("Select a workspace with X-Workspace-ID")
+            token = secrets.token_urlsafe(32)
+            expires_at = _now() + timedelta(hours=12)
+            db.add(UserSessionDB(id=str(uuid.uuid4()), user_id=user.id, token_hash=_token_hash(token), expires_at=expires_at, created_at=_now()))
+            db.commit()
+            return AuthContext(user.id, user.email, membership.workspace_id, membership.role), token, expires_at
+
+    def sign_out(self, token: str) -> None:
+        with get_db() as db:
+            session = db.query(UserSessionDB).filter(UserSessionDB.token_hash == _token_hash(token)).first()
+            if session:
+                session.revoked_at = _now()
+                db.commit()
+
+    def change_password(self, user_id: str, current_password: Optional[str], new_password: str) -> None:
+        with get_db() as db:
+            user = db.query(UserDB).filter(UserDB.id == user_id).first()
+            if not user or (user.password_hash and not _verify_password(current_password or "", user.password_hash)):
+                raise ValueError("Current password is incorrect")
+            user.password_hash = _password_hash(new_password)
+            db.commit()
+
     def has_users(self) -> bool:
         with get_db() as db:
             return db.query(UserDB.id).first() is not None
 
-    def add_member(self, context: AuthContext, email: str, display_name: str, role: str) -> tuple[AuthContext, str]:
+    def add_member(self, context: AuthContext, email: str, display_name: str, role: str, initial_password: Optional[str] = None) -> tuple[AuthContext, str]:
         if context.role not in OWNER_ROLES:
             raise PermissionError("Only workspace owners can add members")
         if role not in VALID_ROLES:
@@ -106,6 +167,7 @@ class IdentityService:
                     email=email.lower().strip(),
                     display_name=display_name.strip(),
                     api_token_hash=_token_hash(token),
+                password_hash=_password_hash(initial_password) if initial_password else None,
                     created_at=datetime.now(timezone.utc),
                 )
                 db.add(user)
@@ -114,6 +176,8 @@ class IdentityService:
                 MembershipDB.workspace_id == context.workspace_id,
                 MembershipDB.user_id == user.id,
             ).first()
+            if initial_password:
+                user.password_hash = _password_hash(initial_password)
             if membership:
                 membership.role = role
             else:

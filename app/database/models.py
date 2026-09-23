@@ -43,9 +43,11 @@ class UserDB(Base):
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     display_name: Mapped[str] = mapped_column(String(255), nullable=False)
     api_token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    password_hash: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     memberships: Mapped[list["MembershipDB"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    sessions: Mapped[list["UserSessionDB"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
 
 class MembershipDB(Base):
@@ -60,6 +62,19 @@ class MembershipDB(Base):
 
     workspace: Mapped[WorkspaceDB] = relationship(back_populates="memberships")
     user: Mapped[UserDB] = relationship(back_populates="memberships")
+
+
+class UserSessionDB(Base):
+    __tablename__ = "user_sessions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    user: Mapped[UserDB] = relationship(back_populates="sessions")
 
 
 class ProviderConnectionDB(Base):

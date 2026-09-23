@@ -12,6 +12,9 @@ from app.api.schemas import (
     WorkspaceBootstrapResponse,
     WorkspaceMemberCreateRequest,
     WorkspaceMemberResponse,
+    SignInRequest,
+    SignInResponse,
+    ChangePasswordRequest,
     ProviderConnectionCreateRequest,
     ProviderConnectionResponse,
     EvaluationTemplateCreateRequest,
@@ -361,7 +364,7 @@ async def bootstrap_workspace(req: WorkspaceBootstrapRequest):
     """Create the first local owner and claim pre-workspace project records."""
     try:
         context, token = await asyncio.to_thread(
-            _identity_service.bootstrap, req.email, req.display_name, req.workspace_name
+            _identity_service.bootstrap, req.email, req.display_name, req.workspace_name, req.password
         )
     except ValueError as error:
         raise HTTPException(status_code=409, detail=str(error))
@@ -369,6 +372,45 @@ async def bootstrap_workspace(req: WorkspaceBootstrapRequest):
     return WorkspaceBootstrapResponse(
         user_id=context.user_id, workspace_id=context.workspace_id, role="owner", api_token=token
     )
+
+
+@app.post("/auth/sign-in", response_model=SignInResponse)
+async def sign_in(req: SignInRequest):
+    try:
+        context, token, expires_at = await asyncio.to_thread(
+            _identity_service.sign_in, req.email, req.password, req.workspace_id
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=401, detail=str(error))
+    await _audit(context, "user.signed_in", "user", context.user_id)
+    return SignInResponse(access_token=token, expires_at=expires_at, workspace_id=context.workspace_id, role=context.role)
+
+
+@app.post("/auth/sign-out", status_code=204)
+async def sign_out(
+    authorization: Optional[str] = Header(default=None),
+    context: Optional[AuthContext] = Depends(get_auth_context),
+):
+    if context is None or not authorization:
+        raise HTTPException(status_code=401, detail="Sign in first")
+    _, _, token = authorization.partition(" ")
+    await asyncio.to_thread(_identity_service.sign_out, token)
+    await _audit(context, "user.signed_out", "user", context.user_id)
+    return Response(status_code=204)
+
+
+@app.put("/auth/password", status_code=204)
+async def change_password(
+    req: ChangePasswordRequest, context: Optional[AuthContext] = Depends(get_auth_context)
+):
+    if context is None:
+        raise HTTPException(status_code=401, detail="Sign in first")
+    try:
+        await asyncio.to_thread(_identity_service.change_password, context.user_id, req.current_password, req.new_password)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    await _audit(context, "user.password_changed", "user", context.user_id)
+    return Response(status_code=204)
 
 
 @app.post("/workspace/members", response_model=WorkspaceMemberResponse, status_code=201)
@@ -380,7 +422,7 @@ async def add_workspace_member(
         raise HTTPException(status_code=401, detail="Bootstrap an owner before adding workspace members")
     try:
         member, token = await asyncio.to_thread(
-            _identity_service.add_member, context, req.email, req.display_name, req.role
+            _identity_service.add_member, context, req.email, req.display_name, req.role, req.initial_password
         )
     except PermissionError as error:
         raise HTTPException(status_code=403, detail=str(error))
