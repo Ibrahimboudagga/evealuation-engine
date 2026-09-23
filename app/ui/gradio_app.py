@@ -51,13 +51,13 @@ async def submit_run(
         return {"error": str(e)}
 
 
-async def setup_workspace(email, display_name, workspace_name):
-    if not email or not display_name or not workspace_name:
-        return {"error": "Enter an owner email, display name, and agency workspace name."}
+async def setup_workspace(email, display_name, workspace_name, password):
+    if not email or not display_name or not workspace_name or not password:
+        return {"error": "Enter an owner email, display name, workspace name, and password."}
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
             response = await client.post(f"{API_BASE}/auth/bootstrap", json={
-                "email": email, "display_name": display_name, "workspace_name": workspace_name,
+                "email": email, "display_name": display_name, "workspace_name": workspace_name, "password": password,
             })
             response.raise_for_status()
         data = response.json()
@@ -65,6 +65,21 @@ async def setup_workspace(email, display_name, workspace_name):
             "message": "Workspace created. Save api_token in WORKSPACE_API_TOKEN, restart Gradio, then use Seed Agency Demo.",
             "workspace_id": data["workspace_id"], "api_token": data["api_token"],
         }
+    except httpx.HTTPStatusError as error:
+        return {"error": f"HTTP {error.response.status_code}: {error.response.text}"}
+    except Exception as error:
+        return {"error": str(error)}
+
+
+async def sign_in_user(email, password, workspace_id):
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.post(f"{API_BASE}/auth/sign-in", json={
+                "email": email, "password": password, "workspace_id": workspace_id or None,
+            })
+            response.raise_for_status()
+        data = response.json()
+        return {"message": "Signed in. Use this personal token as WORKSPACE_API_TOKEN for this local UI process.", **data}
     except httpx.HTTPStatusError as error:
         return {"error": f"HTTP {error.response.status_code}: {error.response.text}"}
     except Exception as error:
@@ -667,9 +682,19 @@ with gr.Blocks(title="LLM Evaluation Engine") as demo:
             wizard_email = gr.Textbox(label="Owner Email")
             wizard_name = gr.Textbox(label="Owner Display Name")
             wizard_workspace = gr.Textbox(label="Agency Workspace Name")
+        wizard_password = gr.Textbox(label="Owner Password (12+ characters)", type="password")
         wizard_button = gr.Button("Create Agency Workspace", variant="primary")
         wizard_output = gr.JSON(label="One-time Setup Result")
-        wizard_button.click(fn=setup_workspace, inputs=[wizard_email, wizard_name, wizard_workspace], outputs=wizard_output)
+        wizard_button.click(fn=setup_workspace, inputs=[wizard_email, wizard_name, wizard_workspace, wizard_password], outputs=wizard_output)
+
+    with gr.Tab("Sign In"):
+        gr.Markdown("Sign in with your individual account. For this local Gradio deployment, copy the returned personal session token to `WORKSPACE_API_TOKEN` and restart the UI process.")
+        login_email = gr.Textbox(label="Email")
+        login_password = gr.Textbox(label="Password", type="password")
+        login_workspace = gr.Textbox(label="Workspace ID (only if you belong to more than one)")
+        login_button = gr.Button("Sign In", variant="primary")
+        login_output = gr.JSON(label="Personal Session")
+        login_button.click(fn=sign_in_user, inputs=[login_email, login_password, login_workspace], outputs=login_output)
 
     with gr.Tab("Provider Connections"):
         gr.Markdown("Workspace owners configure a provider once. The credential is encrypted by the API and is never returned to the browser, reports, or other members.")

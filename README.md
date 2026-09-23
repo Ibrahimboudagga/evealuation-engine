@@ -133,6 +133,10 @@ Complete the **Setup Wizard** at `http://localhost:7860`, save the one-time owne
 
 `GET /health` verifies safe production configuration and database reachability. Workspace owners can review `GET /audit-events`, set retention with `PUT /operations/retention`, and explicitly run retention cleanup through `POST /operations/retention/apply`. Audit events capture the actor and safe metadata for project, dataset, run, baseline, template, export, report-share, and retention changes. Retention cleanup removes expired share links and audit records older than the configured window; it does not delete evaluation data.
 
+### Individual sign-in
+
+Bootstrap can now include a 12-character-or-longer password. Users then create their own expiring 12-hour bearer session with `POST /auth/sign-in`, end it with `POST /auth/sign-out`, and change their password through `PUT /auth/password`. A user who belongs to more than one workspace selects one with `X-Workspace-ID` at sign-in and on authenticated requests. Existing bootstrap tokens remain usable only to set an initial password during migration; new integrations should use individual sessions.
+
 ### 3. Run the CLI
 
 ```bash

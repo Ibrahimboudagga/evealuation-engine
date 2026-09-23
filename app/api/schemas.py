@@ -57,6 +57,7 @@ class WorkspaceBootstrapRequest(BaseModel):
     email: str = Field(..., min_length=3, max_length=255)
     display_name: str = Field(..., min_length=1, max_length=255)
     workspace_name: str = Field(..., min_length=1, max_length=255)
+    password: Optional[str] = Field(default=None, min_length=12, max_length=255)
 
 
 class WorkspaceBootstrapResponse(BaseModel):
@@ -70,6 +71,26 @@ class WorkspaceMemberCreateRequest(BaseModel):
     email: str = Field(..., min_length=3, max_length=255)
     display_name: str = Field(..., min_length=1, max_length=255)
     role: Literal["owner", "editor", "viewer", "client_viewer"]
+    initial_password: Optional[str] = Field(default=None, min_length=12, max_length=255)
+
+
+class SignInRequest(BaseModel):
+    email: str
+    password: str
+    workspace_id: Optional[str] = None
+
+
+class SignInResponse(BaseModel):
+    access_token: str
+    token_type: Literal["bearer"] = "bearer"
+    expires_at: datetime
+    workspace_id: str
+    role: Literal["owner", "editor", "viewer", "client_viewer"]
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: Optional[str] = None
+    new_password: str = Field(..., min_length=12, max_length=255)
 
 
 class WorkspaceMemberResponse(BaseModel):
