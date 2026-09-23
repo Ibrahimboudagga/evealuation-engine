@@ -162,6 +162,42 @@ class ProjectDashboardResponse(BaseModel):
     recent_failures: List[Dict[str, Any]] = Field(default_factory=list)
 
 
+class AuditEventResponse(BaseModel):
+    id: str
+    action: str
+    entity_type: str
+    entity_id: Optional[str] = None
+    project_id: Optional[str] = None
+    actor_email: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+
+
+class AuditEventsResponse(BaseModel):
+    events: List[AuditEventResponse] = Field(default_factory=list)
+
+
+class RetentionSettingsRequest(BaseModel):
+    retention_days: int = Field(..., ge=30, le=3650)
+
+
+class RetentionSettingsResponse(BaseModel):
+    retention_days: int
+
+
+class RetentionApplyResponse(BaseModel):
+    expired_share_links_deleted: int
+    audit_events_deleted: int
+
+
+class HealthResponse(BaseModel):
+    status: Literal["ok", "degraded"]
+    environment: str
+    database_backend: str
+    issues: List[str] = Field(default_factory=list)
+    backup_guidance_url: str
+
+
 class EvaluatorMetric(BaseModel):
     """Aggregated metric for a single evaluator within a run."""
     evaluator: str = Field(..., description="Name of the evaluator")

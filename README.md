@@ -120,6 +120,19 @@ Use `POST /report-shares` to create an expiring link for exactly one run or proj
 
 `GET /projects/{project_id}/dashboard` returns the latest run, baseline/release state, coverage and quality trends, and sanitized recent failures. The Gradio **Project Dashboard** tab presents the same data.
 
+### Hosted pilot and operational controls
+
+Run the hosted pilot with Docker Compose and PostgreSQL:
+
+```bash
+copy .env.production.example .env
+docker compose up --build
+```
+
+Complete the **Setup Wizard** at `http://localhost:7860`, save the one-time owner token as `WORKSPACE_API_TOKEN`, then recreate the UI container. Follow [HOSTED_PILOT_ONBOARDING.md](HOSTED_PILOT_ONBOARDING.md) for the mock-demo, report-sharing, backup, and restoration checklist.
+
+`GET /health` verifies safe production configuration and database reachability. Workspace owners can review `GET /audit-events`, set retention with `PUT /operations/retention`, and explicitly run retention cleanup through `POST /operations/retention/apply`. Audit events capture the actor and safe metadata for project, dataset, run, baseline, template, export, report-share, and retention changes. Retention cleanup removes expired share links and audit records older than the configured window; it does not delete evaluation data.
+
 ### 3. Run the CLI
 
 ```bash

@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Generator
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, Session
 from app.database.models import Base
 from app.config import get_settings
@@ -26,6 +26,16 @@ def init_db() -> None:
     alembic_config.set_main_option("script_location", str(project_root / "alembic"))
     alembic_config.set_main_option("sqlalchemy.url", str(engine.url))
     command.upgrade(alembic_config, "head")
+
+
+def database_is_reachable() -> bool:
+    """Perform a minimal read-only connection check for readiness probes."""
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+        return True
+    except Exception:
+        return False
 
 @contextmanager
 def get_db() -> Generator[Session, None, None]:
