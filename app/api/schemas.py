@@ -101,6 +101,14 @@ class WorkspaceMemberResponse(BaseModel):
     api_token: Optional[str] = Field(default=None, description="Only returned for a newly created local user")
 
 
+class WorkspaceMemberUpdateRequest(BaseModel):
+    role: Literal["owner", "editor", "viewer", "client_viewer"]
+
+
+class ProjectAccessRequest(BaseModel):
+    project_id: str
+
+
 class ProviderConnectionCreateRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     provider: str = Field(..., min_length=1, max_length=100)

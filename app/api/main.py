@@ -12,6 +12,8 @@ from app.api.schemas import (
     WorkspaceBootstrapResponse,
     WorkspaceMemberCreateRequest,
     WorkspaceMemberResponse,
+    WorkspaceMemberUpdateRequest,
+    ProjectAccessRequest,
     SignInRequest,
     SignInResponse,
     ChangePasswordRequest,
@@ -60,7 +62,7 @@ from app.api.schemas import (
     PairwiseComparisonItem,
 )
 from app.database.connection import get_db, init_db, database_is_reachable
-from app.database.models import DatasetDB, EvaluationRunDB, EvaluationResultDB, PairwiseRunDB, ProjectDB
+from app.database.models import DatasetDB, EvaluationRunDB, EvaluationResultDB, MembershipDB, PairwiseRunDB, ProjectAccessDB, ProjectDB
 from app.errors import sanitize_error
 from app.evaluators.registry import EvaluatorRegistry
 from app.evaluators.pairwise_judge import PairwiseJudgeEvaluator
@@ -145,6 +147,11 @@ def _require_project_access(project_id: str, context: Optional[AuthContext], wri
         if context is not None:
             if project.workspace_id != context.workspace_id:
                 raise HTTPException(status_code=404, detail="Project not found in this workspace")
+            if context.role == "client_viewer":
+                membership = db.query(MembershipDB).filter(MembershipDB.workspace_id == context.workspace_id, MembershipDB.user_id == context.user_id).first()
+                granted = membership and db.query(ProjectAccessDB).filter(ProjectAccessDB.membership_id == membership.id, ProjectAccessDB.project_id == project_id).first()
+                if not granted:
+                    raise HTTPException(status_code=404, detail="Project not found in this workspace")
             if write:
                 _require_role(context, WRITE_ROLES)
         return project
@@ -432,6 +439,42 @@ async def add_workspace_member(
         user_id=member.user_id, email=member.email, workspace_id=member.workspace_id,
         role=member.role, api_token=token or None,
     )
+
+
+@app.get("/workspace/members", response_model=list[WorkspaceMemberResponse])
+async def list_workspace_members(context: Optional[AuthContext] = Depends(get_auth_context)):
+    if context is None: raise HTTPException(status_code=401, detail="Workspace authentication is required")
+    _require_role(context, OWNER_ROLES)
+    members = await asyncio.to_thread(_identity_service.members, context.workspace_id)
+    return [WorkspaceMemberResponse(user_id=m.user_id, email=m.user.email, workspace_id=m.workspace_id, role=m.role) for m in members]
+
+
+@app.put("/workspace/members/{user_id}", status_code=204)
+async def update_workspace_member(user_id: str, req: WorkspaceMemberUpdateRequest, context: Optional[AuthContext] = Depends(get_auth_context)):
+    if context is None: raise HTTPException(status_code=401, detail="Workspace authentication is required")
+    _require_role(context, OWNER_ROLES)
+    if not await asyncio.to_thread(_identity_service.update_member_role, context.workspace_id, user_id, req.role): raise HTTPException(status_code=404, detail="Member not found")
+    await _audit(context, "member.role_updated", "user", user_id, metadata={"role": req.role})
+    return Response(status_code=204)
+
+
+@app.delete("/workspace/members/{user_id}", status_code=204)
+async def remove_workspace_member(user_id: str, context: Optional[AuthContext] = Depends(get_auth_context)):
+    if context is None: raise HTTPException(status_code=401, detail="Workspace authentication is required")
+    _require_role(context, OWNER_ROLES)
+    if user_id == context.user_id: raise HTTPException(status_code=400, detail="Owners cannot remove themselves")
+    if not await asyncio.to_thread(_identity_service.remove_member, context.workspace_id, user_id): raise HTTPException(status_code=404, detail="Member not found")
+    await _audit(context, "member.removed", "user", user_id)
+    return Response(status_code=204)
+
+
+@app.post("/workspace/members/{user_id}/projects", status_code=204)
+async def grant_member_project_access(user_id: str, req: ProjectAccessRequest, context: Optional[AuthContext] = Depends(get_auth_context)):
+    if context is None: raise HTTPException(status_code=401, detail="Workspace authentication is required")
+    _require_role(context, OWNER_ROLES)
+    if not await asyncio.to_thread(_identity_service.grant_project_access, context.workspace_id, user_id, req.project_id): raise HTTPException(status_code=404, detail="Member or project not found")
+    await _audit(context, "member.project_granted", "user", user_id, req.project_id)
+    return Response(status_code=204)
 
 
 @app.get("/provider-connections", response_model=list[ProviderConnectionResponse])

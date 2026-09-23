@@ -62,6 +62,17 @@ class MembershipDB(Base):
 
     workspace: Mapped[WorkspaceDB] = relationship(back_populates="memberships")
     user: Mapped[UserDB] = relationship(back_populates="memberships")
+    project_accesses: Mapped[list["ProjectAccessDB"]] = relationship(back_populates="membership", cascade="all, delete-orphan")
+
+
+class ProjectAccessDB(Base):
+    __tablename__ = "project_accesses"
+    __table_args__ = (UniqueConstraint("membership_id", "project_id", name="uq_project_access"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    membership_id: Mapped[str] = mapped_column(String(36), ForeignKey("workspace_memberships.id"), nullable=False)
+    project_id: Mapped[str] = mapped_column(String(36), ForeignKey("projects.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    membership: Mapped[MembershipDB] = relationship(back_populates="project_accesses")
 
 
 class UserSessionDB(Base):
