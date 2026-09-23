@@ -1,0 +1,46 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: evaluation
+      POSTGRES_USER: evaluation
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U evaluation -d evaluation"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: .
+    environment:
+      APP_ENVIRONMENT: production
+      DATABASE_URL: postgresql+psycopg://evaluation:${POSTGRES_PASSWORD}@db:5432/evaluation
+      WORKSPACE_ENCRYPTION_KEY: ${WORKSPACE_ENCRYPTION_KEY:?Set WORKSPACE_ENCRYPTION_KEY in .env}
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+
+  ui:
+    build: .
+    command: ["python", "app/ui/gradio_app.py"]
+    environment:
+      WORKSPACE_API_TOKEN: ${WORKSPACE_API_TOKEN:-}
+      API_BASE: http://api:8000
+    ports:
+      - "7860:7860"
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

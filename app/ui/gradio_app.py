@@ -4,7 +4,7 @@ import os
 import tempfile
 from pathlib import Path
 
-API_BASE = "http://localhost:8000"
+API_BASE = os.getenv("API_BASE", "http://localhost:8000")
 
 PROVIDER_CHOICES = ["openai", "anthropic", "cohere", "gemini", "mock"]
 
@@ -49,6 +49,26 @@ async def submit_run(
         return {"error": f"HTTP {e.response.status_code}: {e.response.text}"}
     except Exception as e:
         return {"error": str(e)}
+
+
+async def setup_workspace(email, display_name, workspace_name):
+    if not email or not display_name or not workspace_name:
+        return {"error": "Enter an owner email, display name, and agency workspace name."}
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.post(f"{API_BASE}/auth/bootstrap", json={
+                "email": email, "display_name": display_name, "workspace_name": workspace_name,
+            })
+            response.raise_for_status()
+        data = response.json()
+        return {
+            "message": "Workspace created. Save api_token in WORKSPACE_API_TOKEN, restart Gradio, then use Seed Agency Demo.",
+            "workspace_id": data["workspace_id"], "api_token": data["api_token"],
+        }
+    except httpx.HTTPStatusError as error:
+        return {"error": f"HTTP {error.response.status_code}: {error.response.text}"}
+    except Exception as error:
+        return {"error": str(error)}
 
 
 async def get_run_status(run_id):
@@ -641,6 +661,16 @@ async def get_pairwise_status(run_id):
 with gr.Blocks(title="LLM Evaluation Engine") as demo:
     gr.Markdown("# LLM Evaluation Engine")
 
+    with gr.Tab("Setup Wizard"):
+        gr.Markdown("### Hosted-pilot checklist\n1. Set `WORKSPACE_ENCRYPTION_KEY` and a PostgreSQL `DATABASE_URL` for production.\n2. Create the first owner below and copy the token once.\n3. Set `WORKSPACE_API_TOKEN`, restart Gradio, then use **Seed Agency Demo**, run a mock evaluation, and create an expiring client link.")
+        with gr.Row():
+            wizard_email = gr.Textbox(label="Owner Email")
+            wizard_name = gr.Textbox(label="Owner Display Name")
+            wizard_workspace = gr.Textbox(label="Agency Workspace Name")
+        wizard_button = gr.Button("Create Agency Workspace", variant="primary")
+        wizard_output = gr.JSON(label="One-time Setup Result")
+        wizard_button.click(fn=setup_workspace, inputs=[wizard_email, wizard_name, wizard_workspace], outputs=wizard_output)
+
     with gr.Tab("Provider Connections"):
         gr.Markdown("Workspace owners configure a provider once. The credential is encrypted by the API and is never returned to the browser, reports, or other members.")
         with gr.Row():
@@ -1007,4 +1037,4 @@ with gr.Blocks(title="LLM Evaluation Engine") as demo:
 
 
 if __name__ == "__main__":
-    demo.launch()
+    demo.launch(server_name="0.0.0.0", server_port=7860)

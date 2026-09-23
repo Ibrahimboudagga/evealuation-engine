@@ -22,6 +22,8 @@ class Settings(BaseSettings):
 
     # Database
     database_url: str = "sqlite:///evals.db"
+    app_environment: str = "development"
+    backup_guidance_url: str = "https://www.postgresql.org/docs/current/backup.html"
 
     # LLM provider API keys
     openai_api_key: Optional[str] = None
@@ -65,3 +67,26 @@ def get_setting(name: str, default: Any = None) -> Any:
     """
     normalized_name = name.lower()
     return getattr(get_settings(), normalized_name, default)
+
+
+def deployment_health() -> dict[str, Any]:
+    """Return safe deployment readiness information without exposing secrets."""
+    settings = get_settings()
+    issues: list[str] = []
+    if not settings.workspace_encryption_key:
+        issues.append("WORKSPACE_ENCRYPTION_KEY is not configured; encrypted provider connections cannot be saved.")
+    if settings.app_environment.lower() == "production" and settings.database_url.startswith("sqlite"):
+        issues.append("Production deployments require a managed PostgreSQL DATABASE_URL; SQLite is only for local development.")
+    return {
+        "status": "ok" if not issues else "degraded",
+        "environment": settings.app_environment,
+        "database_backend": settings.database_url.split(":", 1)[0],
+        "issues": issues,
+        "backup_guidance_url": settings.backup_guidance_url,
+    }
+
+
+def require_production_configuration() -> None:
+    health = deployment_health()
+    if health["environment"].lower() == "production" and health["issues"]:
+        raise RuntimeError("Invalid production configuration: " + " ".join(health["issues"]))

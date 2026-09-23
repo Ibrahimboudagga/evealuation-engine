@@ -20,6 +20,12 @@ from app.api.schemas import (
     ReportShareCreateRequest,
     ReportShareResponse,
     ProjectDashboardResponse,
+    AuditEventResponse,
+    AuditEventsResponse,
+    RetentionSettingsRequest,
+    RetentionSettingsResponse,
+    RetentionApplyResponse,
+    HealthResponse,
     RunStatusResponse,
     RunListItem,
     RunsListResponse,
@@ -50,7 +56,7 @@ from app.api.schemas import (
     PairwiseMetrics,
     PairwiseComparisonItem,
 )
-from app.database.connection import get_db, init_db
+from app.database.connection import get_db, init_db, database_is_reachable
 from app.database.models import DatasetDB, EvaluationRunDB, EvaluationResultDB, PairwiseRunDB, ProjectDB
 from app.errors import sanitize_error
 from app.evaluators.registry import EvaluatorRegistry
@@ -70,7 +76,9 @@ from app.services.report_service import ReportService
 from app.services.identity_service import AuthContext, IdentityService, OWNER_ROLES, WRITE_ROLES
 from app.services.provider_connection_service import ProviderConnectionService
 from app.services.agency_service import AgencyService
+from app.services.operations_service import OperationsService
 from app.services.run_recovery import reconcile_abandoned_runs
+from app.config import deployment_health, require_production_configuration
 from app.schemas.outcomes import EvaluationOutcome, RunStatus
 
 log = structlog.get_logger()
@@ -87,6 +95,7 @@ _demo_seed_service = DemoSeedService()
 _identity_service = IdentityService()
 _provider_connection_service = ProviderConnectionService()
 _agency_service = AgencyService()
+_operations_service = OperationsService()
 
 
 async def get_auth_context(
@@ -111,6 +120,18 @@ async def get_auth_context(
 def _require_role(context: Optional[AuthContext], allowed_roles: set[str]) -> None:
     if context is not None and context.role not in allowed_roles:
         raise HTTPException(status_code=403, detail="Your workspace role does not allow this action")
+
+
+async def _audit(
+    context: Optional[AuthContext], action: str, entity_type: str, entity_id: Optional[str] = None,
+    project_id: Optional[str] = None, metadata: Optional[dict] = None,
+) -> None:
+    """Persist a credential-safe record of a user-visible operational action."""
+    if context is not None:
+        await asyncio.to_thread(
+            _operations_service.record, context.workspace_id, action, entity_type, entity_id,
+            project_id, context, metadata,
+        )
 
 
 def _require_project_access(project_id: str, context: Optional[AuthContext], write: bool = False) -> ProjectDB:
@@ -261,10 +282,78 @@ def _project_to_response(project) -> ProjectResponse:
 
 @app.on_event("startup")
 def startup():
+    require_production_configuration()
     init_db()
     recovered = reconcile_abandoned_runs()
     if recovered["evaluation_runs"] or recovered["pairwise_runs"]:
         log.info("abandoned_runs_reconciled", **recovered)
+
+
+@app.get("/health", response_model=HealthResponse)
+async def health_check():
+    """Safe readiness data for orchestration and agency operations."""
+    health = deployment_health()
+    if not await asyncio.to_thread(database_is_reachable):
+        health["issues"].append("Database is not reachable.")
+        health["status"] = "degraded"
+    return HealthResponse(**health)
+
+
+@app.get("/setup/status")
+async def setup_status():
+    """Public bootstrap status used only by the first-run setup wizard."""
+    return {"workspace_bootstrapped": await asyncio.to_thread(_identity_service.has_users), "health": deployment_health()}
+
+
+@app.get("/audit-events", response_model=AuditEventsResponse)
+async def list_audit_events(
+    project_id: Optional[str] = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    context: Optional[AuthContext] = Depends(get_auth_context),
+):
+    if context is None:
+        raise HTTPException(status_code=401, detail="Workspace authentication is required")
+    _require_role(context, OWNER_ROLES | {"editor"})
+    if project_id:
+        _require_project_access(project_id, context)
+    events = await asyncio.to_thread(_operations_service.list_events, context.workspace_id, project_id, limit)
+    return AuditEventsResponse(events=[AuditEventResponse(
+        id=event.id, action=event.action, entity_type=event.entity_type, entity_id=event.entity_id,
+        project_id=event.project_id, actor_email=event.actor_email, metadata=event.metadata_dict,
+        created_at=event.created_at,
+    ) for event in events])
+
+
+@app.get("/operations/retention", response_model=RetentionSettingsResponse)
+async def get_retention_settings(context: Optional[AuthContext] = Depends(get_auth_context)):
+    if context is None:
+        raise HTTPException(status_code=401, detail="Workspace authentication is required")
+    _require_role(context, OWNER_ROLES)
+    return RetentionSettingsResponse(retention_days=await asyncio.to_thread(
+        _operations_service.retention_days, context.workspace_id
+    ))
+
+
+@app.put("/operations/retention", response_model=RetentionSettingsResponse)
+async def update_retention_settings(
+    req: RetentionSettingsRequest, context: Optional[AuthContext] = Depends(get_auth_context)
+):
+    if context is None:
+        raise HTTPException(status_code=401, detail="Workspace authentication is required")
+    _require_role(context, OWNER_ROLES)
+    days = await asyncio.to_thread(_operations_service.set_retention_days, context.workspace_id, req.retention_days)
+    await _audit(context, "retention.updated", "workspace", context.workspace_id, metadata={"retention_days": days})
+    return RetentionSettingsResponse(retention_days=days)
+
+
+@app.post("/operations/retention/apply", response_model=RetentionApplyResponse)
+async def apply_retention_settings(context: Optional[AuthContext] = Depends(get_auth_context)):
+    if context is None:
+        raise HTTPException(status_code=401, detail="Workspace authentication is required")
+    _require_role(context, OWNER_ROLES)
+    result = await asyncio.to_thread(_operations_service.apply_retention, context.workspace_id)
+    await _audit(context, "retention.applied", "workspace", context.workspace_id, metadata=result)
+    return RetentionApplyResponse(**result)
 
 
 @app.post("/auth/bootstrap", response_model=WorkspaceBootstrapResponse, status_code=201)
@@ -276,6 +365,7 @@ async def bootstrap_workspace(req: WorkspaceBootstrapRequest):
         )
     except ValueError as error:
         raise HTTPException(status_code=409, detail=str(error))
+    await _audit(context, "workspace.bootstrapped", "workspace", context.workspace_id)
     return WorkspaceBootstrapResponse(
         user_id=context.user_id, workspace_id=context.workspace_id, role="owner", api_token=token
     )
@@ -369,6 +459,7 @@ async def create_evaluation_template(
         template = await asyncio.to_thread(_agency_service.create_template, context.workspace_id, req.model_dump())
     except Exception as error:
         raise HTTPException(status_code=400, detail=str(error))
+    await _audit(context, "template.created", "evaluation_template", template.id, metadata={"name": template.name})
     return _template_to_response(template)
 
 
@@ -379,6 +470,7 @@ async def delete_evaluation_template(template_id: str, context: Optional[AuthCon
     _require_role(context, WRITE_ROLES)
     if not await asyncio.to_thread(_agency_service.delete_template, context.workspace_id, template_id):
         raise HTTPException(status_code=404, detail="Evaluation template not found")
+    await _audit(context, "template.deleted", "evaluation_template", template_id)
     return Response(status_code=204)
 
 
@@ -403,6 +495,7 @@ async def launch_evaluation_template(
             "exact_match_pass_rate_max_drop": template.settings.get("exact_match_pass_rate_max_drop"),
         },
     }
+    await _audit(context, "template.launched", "evaluation_template", template_id, metadata={"dataset_id": req.dataset_id})
     return await create_run(RunRequest(**payload), context)
 
 
@@ -422,6 +515,7 @@ async def create_report_share(
         )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
+    await _audit(context, "report_share.created", "report_share", share.id, share.project_id, {"run_id": share.run_id, "expires_at": share.expires_at.isoformat()})
     return _share_to_response(share, f"{str(request.base_url).rstrip('/')}/shared-reports/{token}")
 
 
@@ -432,6 +526,7 @@ async def revoke_report_share(share_id: str, context: Optional[AuthContext] = De
     _require_role(context, WRITE_ROLES)
     if not await asyncio.to_thread(_agency_service.revoke_share, context.workspace_id, share_id):
         raise HTTPException(status_code=404, detail="Report share not found")
+    await _audit(context, "report_share.revoked", "report_share", share_id)
     return Response(status_code=204)
 
 
@@ -595,6 +690,8 @@ async def create_run(req: RunRequest, context: Optional[AuthContext] = Depends(g
 
     asyncio.create_task(_background_run())
 
+    project_id = _require_dataset_access(req.dataset_id, context).project_id if req.dataset_id else None
+    await _audit(context, "run.launched", "evaluation_run", run_id, project_id, {"simulated": runner._is_simulated()})
     return RunResponse(run_id=run_id, status=RunStatus.QUEUED, is_simulated=runner._is_simulated())
 
 
@@ -682,6 +779,7 @@ async def mark_run_as_baseline(run_id: str, context: Optional[AuthContext] = Dep
         run = await asyncio.to_thread(_baseline_service.mark_baseline, run_id)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
+    await _audit(context, "baseline.updated", "evaluation_run", run.id, run.project_id, {"is_baseline": run.is_baseline})
     return BaselineMarkResponse(run_id=run.id, is_baseline=run.is_baseline, status=RunStatus(run.status))
 
 
@@ -797,6 +895,8 @@ async def export_run_report(
         content = _report_service.to_json(report)
         media_type = "application/json"
 
+    run = _require_run_access(run_id, context)
+    await _audit(context, "report.exported", "evaluation_run", run_id, run.project_id, {"format": report_format})
     filename = _report_service.filename(run_id, report_format)
     return Response(
         content=content,
@@ -842,6 +942,7 @@ async def create_project(req: ProjectCreateRequest, context: Optional[AuthContex
         _project_service.create_project, req.name, req.client_name, req.description, req.tags,
         context.workspace_id if context else None,
     )
+    await _audit(context, "project.created", "project", project.id, project.id, {"name": project.name})
     return _project_to_response(project)
 
 
@@ -858,6 +959,7 @@ async def update_project(project_id: str, req: ProjectUpdateRequest, context: Op
     )
     if not project:
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+    await _audit(context, "project.updated", "project", project.id, project.id)
     return _project_to_response(project)
 
 
@@ -867,6 +969,7 @@ async def delete_project(project_id: str, context: Optional[AuthContext] = Depen
     deleted = await asyncio.to_thread(_project_service.delete_project, project_id)
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+    await _audit(context, "project.deleted", "project", project_id, project_id)
     return ProjectDeleteResponse(message="Project deleted; datasets and runs were unassigned.", id=project_id)
 
 
@@ -914,6 +1017,7 @@ async def create_dataset(req: DatasetCreateRequest, context: Optional[AuthContex
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    await _audit(context, "dataset.created", "dataset", dataset.id, dataset.project_id, {"name": dataset.name})
     return _dataset_to_response(dataset)
 
 
@@ -945,6 +1049,7 @@ async def upload_dataset(
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    await _audit(context, "dataset.uploaded", "dataset", dataset.id, dataset.project_id, {"name": dataset.name})
     return _dataset_to_response(dataset)
 
 
@@ -1143,6 +1248,8 @@ async def create_pairwise_run(req: PairwiseRunRequest, context: Optional[AuthCon
 
     asyncio.create_task(_background_pairwise_run())
 
+    project_id = _require_dataset_access(req.dataset_id, context).project_id if req.dataset_id else None
+    await _audit(context, "pairwise_run.launched", "pairwise_run", run_id, project_id, {"simulated": runner._is_simulated()})
     return PairwiseRunResponse(
         run_id=run_id,
         status=RunStatus.QUEUED,

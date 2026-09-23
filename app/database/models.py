@@ -18,6 +18,7 @@ class WorkspaceDB(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     slug: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    retention_days: Mapped[int] = mapped_column(Integer, default=365, nullable=False)
 
     memberships: Mapped[list["MembershipDB"]] = relationship(back_populates="workspace", cascade="all, delete-orphan")
     projects: Mapped[list["ProjectDB"]] = relationship(back_populates="workspace")
@@ -28,6 +29,9 @@ class WorkspaceDB(Base):
         back_populates="workspace", cascade="all, delete-orphan"
     )
     report_shares: Mapped[list["ReportShareDB"]] = relationship(
+        back_populates="workspace", cascade="all, delete-orphan"
+    )
+    audit_events: Mapped[list["AuditEventDB"]] = relationship(
         back_populates="workspace", cascade="all, delete-orphan"
     )
 
@@ -130,6 +134,34 @@ class ReportShareDB(Base):
     @branding.setter
     def branding(self, value: Optional[Dict[str, Any]]) -> None:
         self.branding_json = json.dumps(value or {})
+
+
+class AuditEventDB(Base):
+    __tablename__ = "audit_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(36), ForeignKey("workspaces.id"), nullable=False)
+    actor_user_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    actor_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    action: Mapped[str] = mapped_column(String(100), nullable=False)
+    entity_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    entity_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    project_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    metadata_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    workspace: Mapped[WorkspaceDB] = relationship(back_populates="audit_events")
+
+    @property
+    def metadata_dict(self) -> Dict[str, Any]:
+        try:
+            return json.loads(self.metadata_json or "{}")
+        except json.JSONDecodeError:
+            return {}
+
+    @metadata_dict.setter
+    def metadata_dict(self, value: Optional[Dict[str, Any]]) -> None:
+        self.metadata_json = json.dumps(value or {})
 
 
 class ProjectDB(Base):
