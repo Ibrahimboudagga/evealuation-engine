@@ -8,7 +8,10 @@ from app.schemas.outcomes import RunStatus
 
 
 RESTART_INTERRUPTION_MESSAGE = "Execution interrupted by application restart."
-_UNFINISHED_STATUSES = (RunStatus.QUEUED.value, RunStatus.RUNNING.value)
+# Queued work has never begun and remains valid after a worker restart. Only a
+# claimed/running record represents abandoned execution in the single-worker
+# deployment model.
+_UNFINISHED_STATUSES = (RunStatus.RUNNING.value,)
 
 
 def reconcile_abandoned_runs() -> dict[str, int]:

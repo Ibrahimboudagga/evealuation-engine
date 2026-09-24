@@ -413,6 +413,13 @@ class PairwiseRunDB(Base):
     is_simulated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     run_configuration_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     configuration_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+    next_attempt_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    cancellation_requested_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    worker_claimed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    worker_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    last_transient_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     dataset: Mapped[DatasetDB] = relationship()
     project: Mapped[Optional[ProjectDB]] = relationship(back_populates="pairwise_runs")

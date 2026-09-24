@@ -255,6 +255,13 @@ class RunStatusResponse(BaseModel):
     configuration_verified: bool = False
     project_id: Optional[str] = None
     is_baseline: bool = False
+    attempt_count: int = 0
+    max_attempts: int = 3
+    next_attempt_at: Optional[datetime] = None
+    cancellation_requested_at: Optional[datetime] = None
+    worker_id: Optional[str] = None
+    last_transient_error: Optional[str] = None
+    queue_position: Optional[int] = None
 
 
 class RunListItem(BaseModel):
@@ -265,6 +272,11 @@ class RunListItem(BaseModel):
     is_simulated: bool = False
     project_id: Optional[str] = None
     is_baseline: bool = False
+    attempt_count: int = 0
+    max_attempts: int = 3
+    next_attempt_at: Optional[datetime] = None
+    cancellation_requested_at: Optional[datetime] = None
+    queue_position: Optional[int] = None
 
 
 class RunsListResponse(BaseModel):
@@ -540,6 +552,13 @@ class PairwiseRunStatusResponse(BaseModel):
     run_configuration: Optional[Dict[str, Any]] = None
     configuration_verified: bool = False
     project_id: Optional[str] = None
+    attempt_count: int = 0
+    max_attempts: int = 3
+    next_attempt_at: Optional[datetime] = None
+    cancellation_requested_at: Optional[datetime] = None
+    worker_id: Optional[str] = None
+    last_transient_error: Optional[str] = None
+    queue_position: Optional[int] = None
 
 
 class PairwiseRunListItem(BaseModel):
@@ -551,6 +570,11 @@ class PairwiseRunListItem(BaseModel):
     created_at: Optional[datetime] = None
     is_simulated: bool = False
     project_id: Optional[str] = None
+    attempt_count: int = 0
+    max_attempts: int = 3
+    next_attempt_at: Optional[datetime] = None
+    cancellation_requested_at: Optional[datetime] = None
+    queue_position: Optional[int] = None
 
 
 class PairwiseRunsListResponse(BaseModel):

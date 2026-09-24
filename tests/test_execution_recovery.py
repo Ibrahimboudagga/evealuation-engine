@@ -198,16 +198,14 @@ def test_restart_recovery_marks_only_unfinished_runs_as_interrupted(tmp_path):
         db.commit()
 
     recovered = reconcile_abandoned_runs()
-    assert recovered == {"evaluation_runs": 2, "pairwise_runs": 1}
+    assert recovered == {"evaluation_runs": 1, "pairwise_runs": 0}
 
     with get_db() as db:
-        for run_id in (queued_single, running_single):
-            run = db.query(EvaluationRunDB).filter_by(id=run_id).one()
-            assert run.status == RunStatus.INTERRUPTED.value
-            assert run.error_message == RESTART_INTERRUPTION_MESSAGE
-            assert run.completed_at is not None
+        running = db.query(EvaluationRunDB).filter_by(id=running_single).one()
+        assert running.status == RunStatus.INTERRUPTED.value
+        assert running.error_message == RESTART_INTERRUPTION_MESSAGE
+        assert running.completed_at is not None
+        assert db.query(EvaluationRunDB).filter_by(id=queued_single).one().status == RunStatus.QUEUED.value
         assert db.query(EvaluationRunDB).filter_by(id=completed_single).one().status == RunStatus.COMPLETED.value
-        pairwise_run = db.query(PairwiseRunDB).filter_by(id=queued_pairwise).one()
-        assert pairwise_run.status == RunStatus.INTERRUPTED.value
-        assert pairwise_run.error_message == RESTART_INTERRUPTION_MESSAGE
+        assert db.query(PairwiseRunDB).filter_by(id=queued_pairwise).one().status == RunStatus.QUEUED.value
         assert db.query(PairwiseRunDB).filter_by(id=completed_pairwise).one().status == RunStatus.COMPLETED.value
