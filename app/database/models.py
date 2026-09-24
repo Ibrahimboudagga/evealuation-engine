@@ -19,6 +19,11 @@ class WorkspaceDB(Base):
     slug: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     retention_days: Mapped[int] = mapped_column(Integer, default=365, nullable=False)
+    plan: Mapped[str] = mapped_column(String(50), default="pilot", nullable=False)
+    billing_status: Mapped[str] = mapped_column(String(50), default="trial", nullable=False)
+    trial_ends_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    invoice_contact_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    limits_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     memberships: Mapped[list["MembershipDB"]] = relationship(back_populates="workspace", cascade="all, delete-orphan")
     projects: Mapped[list["ProjectDB"]] = relationship(back_populates="workspace")
@@ -34,6 +39,8 @@ class WorkspaceDB(Base):
     audit_events: Mapped[list["AuditEventDB"]] = relationship(
         back_populates="workspace", cascade="all, delete-orphan"
     )
+    usage_snapshots: Mapped[list["WorkspaceUsageSnapshotDB"]] = relationship(back_populates="workspace", cascade="all, delete-orphan")
+    activation_events: Mapped[list["ActivationEventDB"]] = relationship(back_populates="workspace", cascade="all, delete-orphan")
 
 
 class UserDB(Base):
