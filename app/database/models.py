@@ -19,6 +19,11 @@ class WorkspaceDB(Base):
     slug: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     retention_days: Mapped[int] = mapped_column(Integer, default=365, nullable=False)
+    plan: Mapped[str] = mapped_column(String(50), default="pilot", nullable=False)
+    billing_status: Mapped[str] = mapped_column(String(50), default="trial", nullable=False)
+    trial_ends_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    invoice_contact_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    limits_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     memberships: Mapped[list["MembershipDB"]] = relationship(back_populates="workspace", cascade="all, delete-orphan")
     projects: Mapped[list["ProjectDB"]] = relationship(back_populates="workspace")
@@ -34,6 +39,8 @@ class WorkspaceDB(Base):
     audit_events: Mapped[list["AuditEventDB"]] = relationship(
         back_populates="workspace", cascade="all, delete-orphan"
     )
+    usage_snapshots: Mapped[list["WorkspaceUsageSnapshotDB"]] = relationship(back_populates="workspace", cascade="all, delete-orphan")
+    activation_events: Mapped[list["ActivationEventDB"]] = relationship(back_populates="workspace", cascade="all, delete-orphan")
 
 
 class UserDB(Base):
@@ -188,6 +195,43 @@ class AuditEventDB(Base):
     @metadata_dict.setter
     def metadata_dict(self, value: Optional[Dict[str, Any]]) -> None:
         self.metadata_json = json.dumps(value or {})
+
+
+class WorkspaceUsageSnapshotDB(Base):
+    """A bounded, aggregate usage record for one workspace and billing period."""
+
+    __tablename__ = "workspace_usage_snapshots"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "period_start", "period_end", name="uq_workspace_usage_period"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(36), ForeignKey("workspaces.id"), nullable=False)
+    period_start: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    period_end: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    run_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    evaluated_case_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    provider_call_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    storage_bytes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    report_share_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    active_project_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    workspace: Mapped[WorkspaceDB] = relationship(back_populates="usage_snapshots")
+
+
+class ActivationEventDB(Base):
+    """Privacy-safe product milestone. It intentionally contains no evaluation data."""
+
+    __tablename__ = "activation_events"
+    __table_args__ = (UniqueConstraint("workspace_id", "event_name", name="uq_workspace_activation_event"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(36), ForeignKey("workspaces.id"), nullable=False)
+    event_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    workspace: Mapped[WorkspaceDB] = relationship(back_populates="activation_events")
 
 
 class ProjectDB(Base):

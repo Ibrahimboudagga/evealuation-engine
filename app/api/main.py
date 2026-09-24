@@ -1,6 +1,7 @@
 import asyncio
 import structlog
 from typing import Literal, Optional
+from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, Header, HTTPException, UploadFile, File, Form, Query, Request
 from fastapi.responses import Response
@@ -778,6 +779,22 @@ async def create_run(req: RunRequest, context: Optional[AuthContext] = Depends(g
     project_id = _require_dataset_access(req.dataset_id, context).project_id if req.dataset_id else None
     await _audit(context, "run.launched", "evaluation_run", run_id, project_id, {"simulated": runner._is_simulated()})
     return RunResponse(run_id=run_id, status=RunStatus.QUEUED, is_simulated=runner._is_simulated())
+
+
+@app.post("/runs/{run_id}/cancel", response_model=RunStatusResponse)
+async def cancel_run(run_id: str, context: Optional[AuthContext] = Depends(get_auth_context)):
+    run = _require_run_access(run_id, context, write=True)
+    with get_db() as db:
+        record = db.query(EvaluationRunDB).filter(EvaluationRunDB.id == run_id).first()
+        if record.status not in {RunStatus.QUEUED.value, RunStatus.RUNNING.value}:
+            raise HTTPException(status_code=409, detail="Only queued or running runs can be cancelled")
+        record.cancellation_requested_at = datetime.now(timezone.utc)
+        if record.status == RunStatus.QUEUED.value:
+            record.status = RunStatus.INTERRUPTED.value
+            record.completed_at = datetime.now(timezone.utc)
+        db.commit()
+    await _audit(context, "run.cancellation_requested", "evaluation_run", run_id, run.project_id)
+    return await get_run(run_id, context)
 
 
 @app.get("/runs/{run_id}", response_model=RunStatusResponse)
