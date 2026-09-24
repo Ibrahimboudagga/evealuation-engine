@@ -23,6 +23,12 @@ from app.api.schemas import (
     EvaluationTemplateCreateRequest,
     EvaluationTemplateResponse,
     TemplateLaunchRequest,
+    ScheduleCreateRequest,
+    ScheduleActiveRequest,
+    ScheduleExecutionResponse,
+    ScheduleResponse,
+    WorkspaceLimitsRequest,
+    WorkspaceUsageResponse,
     ReportShareCreateRequest,
     ReportShareResponse,
     ProjectDashboardResponse,
@@ -85,6 +91,8 @@ from app.services.agency_service import AgencyService
 from app.services.operations_service import OperationsService
 from app.services.run_recovery import reconcile_abandoned_runs
 from app.services.queue_worker import QueueWorker
+from app.services.schedule_service import ScheduleService
+from app.services.usage_service import UsageService, WorkspaceLimitExceeded
 from app.config import deployment_health, require_production_configuration
 from app.schemas.outcomes import EvaluationOutcome, RunStatus
 
@@ -103,6 +111,8 @@ _identity_service = IdentityService()
 _provider_connection_service = ProviderConnectionService()
 _agency_service = AgencyService()
 _operations_service = OperationsService()
+_schedule_service = ScheduleService()
+_usage_service = UsageService()
 
 
 async def get_auth_context(
@@ -230,6 +240,32 @@ def _template_to_response(template) -> EvaluationTemplateResponse:
     )
 
 
+def _schedule_to_response(schedule) -> ScheduleResponse:
+    return ScheduleResponse(
+        id=schedule.id,
+        template_id=schedule.template_id,
+        dataset_id=schedule.dataset_id,
+        dataset_version_id=schedule.dataset_version_id,
+        frequency=schedule.frequency,
+        next_execution_at=schedule.next_execution_at,
+        last_executed_at=schedule.last_executed_at,
+        active=schedule.active,
+        last_error=schedule.last_error,
+        created_at=schedule.created_at,
+        executions=[
+            ScheduleExecutionResponse(
+                id=execution.id,
+                run_id=execution.run_id,
+                scheduled_for=execution.scheduled_for,
+                created_at=execution.created_at,
+                status=execution.status,
+                error_message=execution.error_message,
+            )
+            for execution in sorted(schedule.executions, key=lambda item: item.created_at, reverse=True)
+        ],
+    )
+
+
 def _share_to_response(share, url: Optional[str] = None) -> ReportShareResponse:
     return ReportShareResponse(
         id=share.id, project_id=share.project_id, run_id=share.run_id,
@@ -327,6 +363,13 @@ async def health_check():
     health = deployment_health()
     if not await asyncio.to_thread(database_is_reachable):
         health["issues"].append("Database is not reachable.")
+        health["status"] = "degraded"
+    health["worker"] = await asyncio.to_thread(_queue_worker.health)
+    if health["worker"]["status"] in {"unstarted", "stale"}:
+        health["issues"].append(f"Evaluation worker status is {health['worker']['status']}.")
+        health["status"] = "degraded"
+    if health["worker"]["overdue_schedule_count"]:
+        health["issues"].append("One or more active schedules are overdue.")
         health["status"] = "degraded"
     return HealthResponse(**health)
 
@@ -606,6 +649,95 @@ async def launch_evaluation_template(
     return await create_run(RunRequest(**payload), context)
 
 
+@app.get("/schedules", response_model=list[ScheduleResponse])
+async def list_schedules(context: Optional[AuthContext] = Depends(get_auth_context)):
+    if context is None:
+        raise HTTPException(status_code=401, detail="Workspace authentication is required")
+    _require_role(context, OWNER_ROLES | {"editor"})
+    schedules = await asyncio.to_thread(_schedule_service.list, context.workspace_id)
+    return [_schedule_to_response(schedule) for schedule in schedules]
+
+
+@app.post("/schedules", response_model=ScheduleResponse, status_code=201)
+async def create_schedule(req: ScheduleCreateRequest, context: Optional[AuthContext] = Depends(get_auth_context)):
+    if context is None:
+        raise HTTPException(status_code=401, detail="Workspace authentication is required")
+    _require_role(context, WRITE_ROLES)
+    _require_dataset_access(req.dataset_id, context, write=True)
+    try:
+        schedule = await asyncio.to_thread(
+            _schedule_service.create,
+            context.workspace_id,
+            req.template_id,
+            req.dataset_id,
+            req.dataset_version_id,
+            req.frequency,
+            req.next_execution_at,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    await _audit(
+        context,
+        "schedule.created",
+        "evaluation_schedule",
+        schedule.id,
+        metadata={"template_id": schedule.template_id, "dataset_version_id": schedule.dataset_version_id, "frequency": schedule.frequency},
+    )
+    return _schedule_to_response(schedule)
+
+
+@app.put("/schedules/{schedule_id}", response_model=ScheduleResponse)
+async def set_schedule_active(
+    schedule_id: str,
+    req: ScheduleActiveRequest,
+    context: Optional[AuthContext] = Depends(get_auth_context),
+):
+    if context is None:
+        raise HTTPException(status_code=401, detail="Workspace authentication is required")
+    _require_role(context, WRITE_ROLES)
+    schedule = await asyncio.to_thread(_schedule_service.set_active, context.workspace_id, schedule_id, req.active)
+    if not schedule:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    await _audit(context, "schedule.updated", "evaluation_schedule", schedule.id, metadata={"active": schedule.active})
+    return _schedule_to_response(schedule)
+
+
+@app.get("/workspace/usage", response_model=WorkspaceUsageResponse)
+async def get_workspace_usage(context: Optional[AuthContext] = Depends(get_auth_context)):
+    if context is None:
+        raise HTTPException(status_code=401, detail="Workspace authentication is required")
+    _require_role(context, OWNER_ROLES | {"editor"})
+    # Reading the account page refreshes the aggregate record for the current
+    # billing month, so pilots have a durable monthly snapshot without a job.
+    return WorkspaceUsageResponse(**(await asyncio.to_thread(_usage_service.snapshot, context.workspace_id)))
+
+
+@app.post("/workspace/usage/snapshot", response_model=WorkspaceUsageResponse)
+async def snapshot_workspace_usage(context: Optional[AuthContext] = Depends(get_auth_context)):
+    if context is None:
+        raise HTTPException(status_code=401, detail="Workspace authentication is required")
+    _require_role(context, OWNER_ROLES)
+    snapshot = await asyncio.to_thread(_usage_service.snapshot, context.workspace_id)
+    await _audit(context, "usage.snapshot_created", "workspace", context.workspace_id)
+    return WorkspaceUsageResponse(**snapshot)
+
+
+@app.put("/workspace/limits", response_model=WorkspaceUsageResponse)
+async def update_workspace_limits(
+    req: WorkspaceLimitsRequest,
+    context: Optional[AuthContext] = Depends(get_auth_context),
+):
+    if context is None:
+        raise HTTPException(status_code=401, detail="Workspace authentication is required")
+    _require_role(context, OWNER_ROLES)
+    try:
+        await asyncio.to_thread(_usage_service.set_limits, context.workspace_id, req.limits)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    await _audit(context, "workspace.limits_updated", "workspace", context.workspace_id, metadata={"limits": req.limits})
+    return WorkspaceUsageResponse(**(await asyncio.to_thread(_usage_service.overview, context.workspace_id)))
+
+
 @app.post("/report-shares", response_model=ReportShareResponse, status_code=201)
 async def create_report_share(
     req: ReportShareCreateRequest,
@@ -616,10 +748,13 @@ async def create_report_share(
         raise HTTPException(status_code=401, detail="Workspace authentication is required")
     _require_role(context, WRITE_ROLES)
     try:
+        await asyncio.to_thread(_usage_service.assert_capacity, context.workspace_id, report_shares=1)
         share, token = await asyncio.to_thread(
             _agency_service.create_share, context.workspace_id, req.run_id, req.project_id,
             req.expires_in_hours, req.branding,
         )
+    except WorkspaceLimitExceeded as error:
+        raise HTTPException(status_code=429, detail=str(error))
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
     await _audit(context, "report_share.created", "report_share", share.id, share.project_id, {"run_id": share.run_id, "expires_at": share.expires_at.isoformat()})
@@ -663,6 +798,19 @@ async def create_run(req: RunRequest, context: Optional[AuthContext] = Depends(g
         raise HTTPException(status_code=400, detail="Workspace runs must use a registered dataset_id.")
     if req.dataset_id:
         _require_dataset_access(req.dataset_id, context, write=True)
+        if context is not None:
+            try:
+                await asyncio.to_thread(
+                    _usage_service.assert_run_capacity,
+                    context.workspace_id,
+                    req.dataset_id,
+                    req.dataset_version_id,
+                    2,
+                )
+            except WorkspaceLimitExceeded as error:
+                raise HTTPException(status_code=429, detail=str(error))
+            except ValueError as error:
+                raise HTTPException(status_code=400, detail=str(error))
     examples = None
     if req.dataset_path:
         try:
@@ -1072,6 +1220,11 @@ async def get_project_dashboard(project_id: str, context: Optional[AuthContext] 
 @app.post("/projects", response_model=ProjectResponse, status_code=201)
 async def create_project(req: ProjectCreateRequest, context: Optional[AuthContext] = Depends(get_auth_context)):
     _require_role(context, WRITE_ROLES)
+    if context is not None:
+        try:
+            await asyncio.to_thread(_usage_service.assert_capacity, context.workspace_id, active_projects=1)
+        except WorkspaceLimitExceeded as error:
+            raise HTTPException(status_code=429, detail=str(error))
     project = await asyncio.to_thread(
         _project_service.create_project, req.name, req.client_name, req.description, req.tags,
         context.workspace_id if context else None,
@@ -1140,6 +1293,10 @@ async def create_dataset(req: DatasetCreateRequest, context: Optional[AuthContex
         if not req.project_id:
             raise HTTPException(status_code=400, detail="Workspace datasets must be assigned to a project.")
         _require_project_access(req.project_id, context, write=True)
+        try:
+            await asyncio.to_thread(_usage_service.assert_capacity, context.workspace_id, storage_bytes=len(req.content.encode("utf-8")))
+        except WorkspaceLimitExceeded as error:
+            raise HTTPException(status_code=429, detail=str(error))
     try:
         dataset = await asyncio.to_thread(
             _dataset_service.create_dataset,
@@ -1170,6 +1327,11 @@ async def upload_dataset(
             raise HTTPException(status_code=400, detail="Workspace datasets must be assigned to a project.")
         _require_project_access(project_id, context, write=True)
     file_content = await file.read()
+    if context is not None:
+        try:
+            await asyncio.to_thread(_usage_service.assert_capacity, context.workspace_id, storage_bytes=len(file_content))
+        except WorkspaceLimitExceeded as error:
+            raise HTTPException(status_code=429, detail=str(error))
     tag_list = [t.strip() for t in tags.split(",")] if tags else None
     try:
         dataset = await asyncio.to_thread(
@@ -1191,6 +1353,10 @@ async def upload_dataset(
 async def add_dataset_version(dataset_id: str, req: DatasetAddVersionRequest, context: Optional[AuthContext] = Depends(get_auth_context)):
     if context is not None:
         _require_dataset_access(dataset_id, context, write=True)
+        try:
+            await asyncio.to_thread(_usage_service.assert_capacity, context.workspace_id, storage_bytes=len(req.content.encode("utf-8")))
+        except WorkspaceLimitExceeded as error:
+            raise HTTPException(status_code=429, detail=str(error))
     try:
         version = await asyncio.to_thread(
             _dataset_service.add_version,
@@ -1248,6 +1414,19 @@ async def create_pairwise_run(req: PairwiseRunRequest, context: Optional[AuthCon
         raise HTTPException(status_code=400, detail="Workspace runs must use a registered dataset_id.")
     if req.dataset_id:
         _require_dataset_access(req.dataset_id, context, write=True)
+        if context is not None:
+            try:
+                await asyncio.to_thread(
+                    _usage_service.assert_run_capacity,
+                    context.workspace_id,
+                    req.dataset_id,
+                    req.dataset_version_id,
+                    3,
+                )
+            except WorkspaceLimitExceeded as error:
+                raise HTTPException(status_code=429, detail=str(error))
+            except ValueError as error:
+                raise HTTPException(status_code=400, detail=str(error))
     examples = None
     if req.dataset_path:
         try:

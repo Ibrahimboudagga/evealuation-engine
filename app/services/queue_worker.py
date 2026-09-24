@@ -16,6 +16,7 @@ from app.database.models import (
     PairwiseComparisonDB,
     PairwiseRunDB,
     ProjectDB,
+    WorkerStateDB,
 )
 from app.errors import RunCancellationRequested, sanitize_error
 from app.evaluators.pairwise_judge import PairwiseJudgeEvaluator
@@ -26,6 +27,7 @@ from app.runners.pairwise_runner import PairwiseEvaluationRunner
 from app.schemas.outcomes import EvaluationOutcome, RunStatus
 from app.services.operations_service import OperationsService
 from app.services.provider_connection_service import ProviderConnectionService
+from app.services.schedule_service import ScheduleService
 
 
 RunKind = Literal["evaluation_run", "pairwise_run"]
@@ -88,10 +90,12 @@ class QueueWorker:
         self._task: Optional[asyncio.Task] = None
         self._operations = OperationsService()
         self._connections = ProviderConnectionService()
+        self._schedules = ScheduleService()
 
     async def start(self) -> None:
         if self._task and not self._task.done():
             return
+        await asyncio.to_thread(self._heartbeat)
         self._task = asyncio.create_task(self._loop(), name=f"evaluation-queue-{self.worker_id}")
 
     async def stop(self) -> None:
@@ -108,6 +112,56 @@ class QueueWorker:
             processed = await self.run_once()
             if not processed:
                 await asyncio.sleep(self.poll_interval_seconds)
+
+    def _heartbeat(self, claimed: Optional[ClaimedRun] = None) -> None:
+        now = utcnow()
+        with get_db() as db:
+            state = db.query(WorkerStateDB).filter(WorkerStateDB.worker_id == self.worker_id).first()
+            if not state:
+                state = WorkerStateDB(worker_id=self.worker_id, last_heartbeat_at=now, updated_at=now)
+                db.add(state)
+            state.last_heartbeat_at = now
+            state.claimed_run_id = claimed.run_id if claimed else None
+            state.claimed_run_type = claimed.kind if claimed else None
+            state.updated_at = now
+            db.commit()
+
+    def health(self) -> dict[str, Any]:
+        """Return persisted worker and queue signals without exposing run data."""
+        with get_db() as db:
+            state = db.query(WorkerStateDB).filter(WorkerStateDB.worker_id == self.worker_id).first()
+            queue_depth = (
+                db.query(EvaluationRunDB).filter(EvaluationRunDB.status == RunStatus.QUEUED.value).count()
+                + db.query(PairwiseRunDB).filter(PairwiseRunDB.status == RunStatus.QUEUED.value).count()
+            )
+            failed_run_count = (
+                db.query(EvaluationRunDB).filter(EvaluationRunDB.status == RunStatus.FAILED.value).count()
+                + db.query(PairwiseRunDB).filter(PairwiseRunDB.status == RunStatus.FAILED.value).count()
+            )
+            retried_run_count = (
+                db.query(EvaluationRunDB).filter(EvaluationRunDB.attempt_count > 1).count()
+                + db.query(PairwiseRunDB).filter(PairwiseRunDB.attempt_count > 1).count()
+            )
+        heartbeat_age_seconds = None
+        if state:
+            heartbeat_age_seconds = max(0, int((utcnow() - state.last_heartbeat_at).total_seconds()))
+        worker_status = "unstarted" if not state else "working" if state.claimed_run_id else "healthy"
+        if heartbeat_age_seconds is not None and heartbeat_age_seconds > 120:
+            worker_status = "stale"
+        return {
+            "worker_id": self.worker_id,
+            "status": worker_status,
+            "last_heartbeat_at": state.last_heartbeat_at if state else None,
+            "heartbeat_age_seconds": heartbeat_age_seconds,
+            "claimed_run_id": state.claimed_run_id if state else None,
+            "claimed_run_type": state.claimed_run_type if state else None,
+            "queue_depth": queue_depth,
+            "retried_run_count": retried_run_count,
+            "retry_count": retried_run_count,
+            "failed_run_count": failed_run_count,
+            "failed_count": failed_run_count,
+            "overdue_schedule_count": self._schedules.overdue_count(),
+        }
 
     def _record(
         self,
@@ -189,6 +243,7 @@ class QueueWorker:
             )
 
         self._record(claimed, "run.claimed", {"worker_id": self.worker_id})
+        self._heartbeat(claimed)
         return claimed
 
     def _resolve_provider(self, workspace_id: Optional[str], settings: dict[str, Any]):
@@ -414,10 +469,15 @@ class QueueWorker:
         )
 
     async def run_once(self) -> bool:
+        self._heartbeat()
+        schedule_result = await asyncio.to_thread(self._schedules.trigger_due)
         claimed = await asyncio.to_thread(self.claim_next)
         if not claimed:
-            return False
-        await self._execute_claim(claimed)
+            return bool(schedule_result["triggered"] or schedule_result["failed"])
+        try:
+            await self._execute_claim(claimed)
+        finally:
+            self._heartbeat()
         return True
 
     def retry_now(self, kind: RunKind, run_id: str) -> bool:

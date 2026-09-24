@@ -41,6 +41,7 @@ class WorkspaceDB(Base):
     )
     usage_snapshots: Mapped[list["WorkspaceUsageSnapshotDB"]] = relationship(back_populates="workspace", cascade="all, delete-orphan")
     activation_events: Mapped[list["ActivationEventDB"]] = relationship(back_populates="workspace", cascade="all, delete-orphan")
+    schedules: Mapped[list["EvaluationScheduleDB"]] = relationship(back_populates="workspace", cascade="all, delete-orphan")
 
 
 class UserDB(Base):
@@ -127,6 +128,7 @@ class EvaluationTemplateDB(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     workspace: Mapped[WorkspaceDB] = relationship(back_populates="evaluation_templates")
+    schedules: Mapped[list["EvaluationScheduleDB"]] = relationship(back_populates="template", cascade="all, delete-orphan")
 
     @property
     def settings(self) -> Dict[str, Any]:
@@ -232,6 +234,57 @@ class ActivationEventDB(Base):
     occurred_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
 
     workspace: Mapped[WorkspaceDB] = relationship(back_populates="activation_events")
+
+
+class EvaluationScheduleDB(Base):
+    """A recurring single-model template execution for one dataset version."""
+
+    __tablename__ = "evaluation_schedules"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(36), ForeignKey("workspaces.id"), nullable=False)
+    template_id: Mapped[str] = mapped_column(String(36), ForeignKey("evaluation_templates.id"), nullable=False)
+    dataset_id: Mapped[str] = mapped_column(String(36), ForeignKey("datasets.id"), nullable=False)
+    dataset_version_id: Mapped[str] = mapped_column(String(36), ForeignKey("dataset_versions.id"), nullable=False)
+    frequency: Mapped[str] = mapped_column(String(20), nullable=False)
+    next_execution_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    last_executed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    workspace: Mapped[WorkspaceDB] = relationship(back_populates="schedules")
+    template: Mapped[EvaluationTemplateDB] = relationship(back_populates="schedules")
+    executions: Mapped[list["ScheduleExecutionDB"]] = relationship(back_populates="schedule", cascade="all, delete-orphan")
+
+
+class ScheduleExecutionDB(Base):
+    """Append-only evidence linking a planned schedule occurrence to its run."""
+
+    __tablename__ = "schedule_executions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    schedule_id: Mapped[str] = mapped_column(String(36), ForeignKey("evaluation_schedules.id"), nullable=False)
+    run_id: Mapped[Optional[str]] = mapped_column(String(255), ForeignKey("evaluation_runs.id"), nullable=True)
+    scheduled_for: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    status: Mapped[str] = mapped_column(String(30), nullable=False)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    schedule: Mapped[EvaluationScheduleDB] = relationship(back_populates="executions")
+
+
+class WorkerStateDB(Base):
+    """Single-worker heartbeat and claim state used by readiness checks."""
+
+    __tablename__ = "worker_states"
+
+    worker_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    last_heartbeat_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    claimed_run_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    claimed_run_type: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
 class ProjectDB(Base):
