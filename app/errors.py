@@ -3,6 +3,10 @@
 import re
 
 
+class RunCancellationRequested(Exception):
+    """Raised internally when a worker observes a persisted cancellation request."""
+
+
 _NAMED_SECRET = re.compile(
     r"(?i)\b(api[_ -]?key|authorization|bearer|token|password)\b\s*[:=]\s*[^\s,;]+"
 )

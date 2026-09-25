@@ -15,7 +15,7 @@ from app.database.models import (
     DatasetDB, DatasetVersionDB,
     PairwiseRunDB, PairwiseComparisonDB,
 )
-from app.errors import sanitize_error
+from app.errors import RunCancellationRequested, sanitize_error
 from app.evaluators.base_pairwise import BasePairwiseEvaluator
 from app.providers.base import BaseProvider
 from app.schemas.example import EvaluationExample
@@ -103,14 +103,20 @@ class PairwiseEvaluationRunner:
                 run.error_message = sanitize_error(error)
                 db.commit()
 
-    def _mark_run_interrupted(self, run_id: str) -> None:
+    def _mark_run_interrupted(self, run_id: str, message: str = "Execution interrupted.") -> None:
         with get_db() as db:
             run = db.query(PairwiseRunDB).filter(PairwiseRunDB.id == run_id).first()
             if run:
                 run.status = RunStatus.INTERRUPTED.value
                 run.completed_at = datetime.now(timezone.utc)
-                run.error_message = "Execution interrupted."
+                run.error_message = message
                 db.commit()
+
+    def _raise_if_cancelled(self, run_id: str) -> None:
+        with get_db() as db:
+            run = db.query(PairwiseRunDB).filter(PairwiseRunDB.id == run_id).first()
+            if run and run.cancellation_requested_at is not None:
+                raise RunCancellationRequested("Execution cancelled by user request.")
 
     def _persist_comparison_batch(self, run_id: str, comparisons: List[PairwiseComparisonDB]) -> None:
         """Commit a small completed batch so a restart retains prior work."""
@@ -219,7 +225,9 @@ class PairwiseEvaluationRunner:
         run_id: str,
     ) -> Optional[PairwiseComparisonDB]:
         """Run a single pairwise comparison for one example."""
+        self._raise_if_cancelled(run_id)
         async with self.semaphore:
+            self._raise_if_cancelled(run_id)
             log.info("running_pairwise_comparison", example_id=example.id)
             start_time = time.perf_counter()
 
@@ -382,6 +390,9 @@ class PairwiseEvaluationRunner:
                 dataset_version_id=dataset_version_id,
                 run_id=run_id,
             )
+        except RunCancellationRequested as error:
+            self._mark_run_interrupted(run_id, str(error))
+            return run_id
         except asyncio.CancelledError:
             self._mark_run_interrupted(run_id)
             raise
@@ -407,6 +418,7 @@ class PairwiseEvaluationRunner:
         Returns:
             The run ID string.
         """
+        self._raise_if_cancelled(run_id)
         if dataset_id is not None:
             # New mode: load from DB
             with get_db() as db:
@@ -479,6 +491,7 @@ class PairwiseEvaluationRunner:
 
         try:
             for start in range(0, len(examples), self.result_batch_size):
+                self._raise_if_cancelled(run_id)
                 batch = examples[start:start + self.result_batch_size]
                 results = await asyncio.gather(
                     *(self._run_example(example, run_id) for example in batch)
@@ -492,6 +505,9 @@ class PairwiseEvaluationRunner:
                     run.status = RunStatus.COMPLETED.value
                     run.completed_at = datetime.now(timezone.utc)
                 db.commit()
+        except RunCancellationRequested as error:
+            self._mark_run_interrupted(run_id, str(error))
+            return run_id
         except asyncio.CancelledError:
             self._mark_run_interrupted(run_id)
             raise

@@ -1,6 +1,7 @@
 import gradio as gr
 import httpx
 import os
+import json
 import tempfile
 from pathlib import Path
 
@@ -491,6 +492,65 @@ async def launch_template(template_id, dataset_id, dataset_version_id):
         return {"error": str(error)}
 
 
+async def create_schedule(template_id, dataset_id, dataset_version_id, frequency):
+    if not template_id or not dataset_id or not dataset_version_id:
+        return {"error": "Select a template, dataset, and dataset version."}
+    try:
+        async with httpx.AsyncClient(timeout=15.0, headers=_api_headers()) as client:
+            response = await client.post(f"{API_BASE}/schedules", json={
+                "template_id": template_id, "dataset_id": dataset_id,
+                "dataset_version_id": dataset_version_id, "frequency": frequency,
+            })
+            response.raise_for_status()
+        return {"message": "Schedule saved. The worker will submit its next run automatically.", "schedule": response.json()}
+    except httpx.HTTPStatusError as error:
+        return {"error": f"HTTP {error.response.status_code}: {error.response.text}"}
+    except Exception as error:
+        return {"error": str(error)}
+
+
+async def list_schedules():
+    try:
+        async with httpx.AsyncClient(timeout=15.0, headers=_api_headers()) as client:
+            response = await client.get(f"{API_BASE}/schedules")
+            response.raise_for_status()
+        return response.json()
+    except httpx.HTTPStatusError as error:
+        return {"error": f"HTTP {error.response.status_code}: {error.response.text}"}
+    except Exception as error:
+        return {"error": str(error)}
+
+
+async def get_workspace_usage():
+    try:
+        async with httpx.AsyncClient(timeout=15.0, headers=_api_headers()) as client:
+            response = await client.get(f"{API_BASE}/workspace/usage")
+            response.raise_for_status()
+        return response.json()
+    except httpx.HTTPStatusError as error:
+        return {"error": f"HTTP {error.response.status_code}: {error.response.text}"}
+    except Exception as error:
+        return {"error": str(error)}
+
+
+async def save_workspace_limits(limits_text):
+    try:
+        limits = json.loads(limits_text or "{}")
+        if not isinstance(limits, dict):
+            return {"error": "Limits must be a JSON object."}
+    except json.JSONDecodeError as error:
+        return {"error": f"Limits must be valid JSON: {error.msg}"}
+    try:
+        async with httpx.AsyncClient(timeout=15.0, headers=_api_headers()) as client:
+            response = await client.put(f"{API_BASE}/workspace/limits", json={"limits": limits})
+            response.raise_for_status()
+        return response.json()
+    except httpx.HTTPStatusError as error:
+        return {"error": f"HTTP {error.response.status_code}: {error.response.text}"}
+    except Exception as error:
+        return {"error": str(error)}
+
+
 async def create_report_share(run_id, hours, agency_name, report_title):
     if not run_id:
         return {"error": "Enter a run ID to share."}
@@ -764,6 +824,38 @@ with gr.Blocks(title="LLM Evaluation Engine") as demo:
                 project_output = gr.JSON(label="Project Result")
                 demo_seed_output = gr.JSON(label="Demo Setup")
 
+    with gr.Tab("Scheduled Evaluations"):
+        gr.Markdown("Schedule a saved template against a fixed dataset version. The single worker checks due daily and weekly schedules automatically.")
+        with gr.Row():
+            schedule_template = gr.Dropdown(label="Saved Template", choices=[])
+            schedule_dataset = gr.Dropdown(label="Dataset", choices=[])
+            schedule_version = gr.Dropdown(label="Dataset Version", choices=[])
+            schedule_frequency = gr.Dropdown(label="Frequency", choices=["daily", "weekly"], value="daily")
+        with gr.Row():
+            schedule_create_button = gr.Button("Create Schedule", variant="primary")
+            schedule_list_button = gr.Button("Refresh Schedules")
+        schedule_output = gr.JSON(label="Schedule Details")
+        schedule_dataset.change(fn=refresh_version_choices, inputs=schedule_dataset, outputs=schedule_version)
+        schedule_create_button.click(
+            fn=create_schedule,
+            inputs=[schedule_template, schedule_dataset, schedule_version, schedule_frequency],
+            outputs=schedule_output,
+        )
+        schedule_list_button.click(fn=list_schedules, outputs=schedule_output)
+
+    with gr.Tab("Usage & Limits"):
+        gr.Markdown("Review this month's aggregate usage and set pilot-plan limits. Limits are checked before runs, projects, dataset storage, and report links are created.")
+        usage_refresh = gr.Button("Refresh Usage", variant="primary")
+        usage_output = gr.JSON(label="Current Usage and Limits")
+        usage_limits = gr.Textbox(
+            label="Limits JSON",
+            value='{"runs": 100, "evaluated_cases": 1000, "provider_calls": 3000, "storage_bytes": 10485760, "report_shares": 20, "active_projects": 5}',
+            lines=4,
+        )
+        usage_save = gr.Button("Save Limits")
+        usage_refresh.click(fn=get_workspace_usage, outputs=usage_output)
+        usage_save.click(fn=save_workspace_limits, inputs=usage_limits, outputs=usage_output)
+
     with gr.Tab("Datasets"):
         gr.Markdown("Upload and version JSONL datasets. Assign each dataset to a client project; runs inherit that project.")
         with gr.Row():
@@ -1035,8 +1127,10 @@ with gr.Blocks(title="LLM Evaluation Engine") as demo:
     )
     demo.load(fn=project_choice_update, outputs=upload_project)
     demo.load(fn=template_choice_update, outputs=launch_template_choice)
+    demo.load(fn=template_choice_update, outputs=schedule_template)
     demo.load(fn=project_choice_update, outputs=dashboard_project)
     demo.load(fn=dataset_choice_update, outputs=launch_template_dataset)
+    demo.load(fn=dataset_choice_update, outputs=schedule_dataset)
     demo.load(fn=run_provider_connection_choice_updates, outputs=[template_candidate_connection, template_judge_connection])
 
     with gr.Tab("Pairwise Results"):

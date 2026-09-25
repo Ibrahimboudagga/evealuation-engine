@@ -23,6 +23,12 @@ from app.api.schemas import (
     EvaluationTemplateCreateRequest,
     EvaluationTemplateResponse,
     TemplateLaunchRequest,
+    ScheduleCreateRequest,
+    ScheduleActiveRequest,
+    ScheduleExecutionResponse,
+    ScheduleResponse,
+    WorkspaceLimitsRequest,
+    WorkspaceUsageResponse,
     ReportShareCreateRequest,
     ReportShareResponse,
     ProjectDashboardResponse,
@@ -84,13 +90,16 @@ from app.services.provider_connection_service import ProviderConnectionService
 from app.services.agency_service import AgencyService
 from app.services.operations_service import OperationsService
 from app.services.run_recovery import reconcile_abandoned_runs
+from app.services.queue_worker import QueueWorker
+from app.services.schedule_service import ScheduleService
+from app.services.usage_service import UsageService, WorkspaceLimitExceeded
 from app.config import deployment_health, require_production_configuration
 from app.schemas.outcomes import EvaluationOutcome, RunStatus
 
 log = structlog.get_logger()
 
 app = FastAPI(title="LLM Evaluation Engine", version="1.0.0")
-_single_execution_worker = asyncio.Lock()
+_queue_worker = QueueWorker()
 
 # Service singleton
 _dataset_service = DatasetService()
@@ -102,6 +111,8 @@ _identity_service = IdentityService()
 _provider_connection_service = ProviderConnectionService()
 _agency_service = AgencyService()
 _operations_service = OperationsService()
+_schedule_service = ScheduleService()
+_usage_service = UsageService()
 
 
 async def get_auth_context(
@@ -194,6 +205,20 @@ def _require_pairwise_run_access(run_id: str, context: Optional[AuthContext], wr
         return run
 
 
+def _queue_position(model, run_id: str) -> Optional[int]:
+    """Return a run's position among queued work of the same type."""
+    with get_db() as db:
+        run = db.query(model).filter(model.id == run_id).first()
+        if not run or run.status != RunStatus.QUEUED.value or run.cancellation_requested_at is not None:
+            return None
+        ahead = db.query(model).filter(
+            model.status == RunStatus.QUEUED.value,
+            model.cancellation_requested_at.is_(None),
+            model.created_at < run.created_at,
+        ).count()
+        return ahead + 1
+
+
 def _connection_to_response(connection) -> ProviderConnectionResponse:
     return ProviderConnectionResponse(
         id=connection.id,
@@ -212,6 +237,32 @@ def _template_to_response(template) -> EvaluationTemplateResponse:
     return EvaluationTemplateResponse(
         id=template.id, name=template.name, description=template.description,
         created_at=template.created_at, updated_at=template.updated_at, **template.settings,
+    )
+
+
+def _schedule_to_response(schedule) -> ScheduleResponse:
+    return ScheduleResponse(
+        id=schedule.id,
+        template_id=schedule.template_id,
+        dataset_id=schedule.dataset_id,
+        dataset_version_id=schedule.dataset_version_id,
+        frequency=schedule.frequency,
+        next_execution_at=schedule.next_execution_at,
+        last_executed_at=schedule.last_executed_at,
+        active=schedule.active,
+        last_error=schedule.last_error,
+        created_at=schedule.created_at,
+        executions=[
+            ScheduleExecutionResponse(
+                id=execution.id,
+                run_id=execution.run_id,
+                scheduled_for=execution.scheduled_for,
+                created_at=execution.created_at,
+                status=execution.status,
+                error_message=execution.error_message,
+            )
+            for execution in sorted(schedule.executions, key=lambda item: item.created_at, reverse=True)
+        ],
     )
 
 
@@ -292,12 +343,18 @@ def _project_to_response(project) -> ProjectResponse:
 
 
 @app.on_event("startup")
-def startup():
+async def startup():
     require_production_configuration()
     init_db()
     recovered = reconcile_abandoned_runs()
     if recovered["evaluation_runs"] or recovered["pairwise_runs"]:
         log.info("abandoned_runs_reconciled", **recovered)
+    await _queue_worker.start()
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    await _queue_worker.stop()
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -306,6 +363,13 @@ async def health_check():
     health = deployment_health()
     if not await asyncio.to_thread(database_is_reachable):
         health["issues"].append("Database is not reachable.")
+        health["status"] = "degraded"
+    health["worker"] = await asyncio.to_thread(_queue_worker.health)
+    if health["worker"]["status"] in {"unstarted", "stale"}:
+        health["issues"].append(f"Evaluation worker status is {health['worker']['status']}.")
+        health["status"] = "degraded"
+    if health["worker"]["overdue_schedule_count"]:
+        health["issues"].append("One or more active schedules are overdue.")
         health["status"] = "degraded"
     return HealthResponse(**health)
 
@@ -585,6 +649,95 @@ async def launch_evaluation_template(
     return await create_run(RunRequest(**payload), context)
 
 
+@app.get("/schedules", response_model=list[ScheduleResponse])
+async def list_schedules(context: Optional[AuthContext] = Depends(get_auth_context)):
+    if context is None:
+        raise HTTPException(status_code=401, detail="Workspace authentication is required")
+    _require_role(context, OWNER_ROLES | {"editor"})
+    schedules = await asyncio.to_thread(_schedule_service.list, context.workspace_id)
+    return [_schedule_to_response(schedule) for schedule in schedules]
+
+
+@app.post("/schedules", response_model=ScheduleResponse, status_code=201)
+async def create_schedule(req: ScheduleCreateRequest, context: Optional[AuthContext] = Depends(get_auth_context)):
+    if context is None:
+        raise HTTPException(status_code=401, detail="Workspace authentication is required")
+    _require_role(context, WRITE_ROLES)
+    _require_dataset_access(req.dataset_id, context, write=True)
+    try:
+        schedule = await asyncio.to_thread(
+            _schedule_service.create,
+            context.workspace_id,
+            req.template_id,
+            req.dataset_id,
+            req.dataset_version_id,
+            req.frequency,
+            req.next_execution_at,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    await _audit(
+        context,
+        "schedule.created",
+        "evaluation_schedule",
+        schedule.id,
+        metadata={"template_id": schedule.template_id, "dataset_version_id": schedule.dataset_version_id, "frequency": schedule.frequency},
+    )
+    return _schedule_to_response(schedule)
+
+
+@app.put("/schedules/{schedule_id}", response_model=ScheduleResponse)
+async def set_schedule_active(
+    schedule_id: str,
+    req: ScheduleActiveRequest,
+    context: Optional[AuthContext] = Depends(get_auth_context),
+):
+    if context is None:
+        raise HTTPException(status_code=401, detail="Workspace authentication is required")
+    _require_role(context, WRITE_ROLES)
+    schedule = await asyncio.to_thread(_schedule_service.set_active, context.workspace_id, schedule_id, req.active)
+    if not schedule:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    await _audit(context, "schedule.updated", "evaluation_schedule", schedule.id, metadata={"active": schedule.active})
+    return _schedule_to_response(schedule)
+
+
+@app.get("/workspace/usage", response_model=WorkspaceUsageResponse)
+async def get_workspace_usage(context: Optional[AuthContext] = Depends(get_auth_context)):
+    if context is None:
+        raise HTTPException(status_code=401, detail="Workspace authentication is required")
+    _require_role(context, OWNER_ROLES | {"editor"})
+    # Reading the account page refreshes the aggregate record for the current
+    # billing month, so pilots have a durable monthly snapshot without a job.
+    return WorkspaceUsageResponse(**(await asyncio.to_thread(_usage_service.snapshot, context.workspace_id)))
+
+
+@app.post("/workspace/usage/snapshot", response_model=WorkspaceUsageResponse)
+async def snapshot_workspace_usage(context: Optional[AuthContext] = Depends(get_auth_context)):
+    if context is None:
+        raise HTTPException(status_code=401, detail="Workspace authentication is required")
+    _require_role(context, OWNER_ROLES)
+    snapshot = await asyncio.to_thread(_usage_service.snapshot, context.workspace_id)
+    await _audit(context, "usage.snapshot_created", "workspace", context.workspace_id)
+    return WorkspaceUsageResponse(**snapshot)
+
+
+@app.put("/workspace/limits", response_model=WorkspaceUsageResponse)
+async def update_workspace_limits(
+    req: WorkspaceLimitsRequest,
+    context: Optional[AuthContext] = Depends(get_auth_context),
+):
+    if context is None:
+        raise HTTPException(status_code=401, detail="Workspace authentication is required")
+    _require_role(context, OWNER_ROLES)
+    try:
+        await asyncio.to_thread(_usage_service.set_limits, context.workspace_id, req.limits)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    await _audit(context, "workspace.limits_updated", "workspace", context.workspace_id, metadata={"limits": req.limits})
+    return WorkspaceUsageResponse(**(await asyncio.to_thread(_usage_service.overview, context.workspace_id)))
+
+
 @app.post("/report-shares", response_model=ReportShareResponse, status_code=201)
 async def create_report_share(
     req: ReportShareCreateRequest,
@@ -595,10 +748,13 @@ async def create_report_share(
         raise HTTPException(status_code=401, detail="Workspace authentication is required")
     _require_role(context, WRITE_ROLES)
     try:
+        await asyncio.to_thread(_usage_service.assert_capacity, context.workspace_id, report_shares=1)
         share, token = await asyncio.to_thread(
             _agency_service.create_share, context.workspace_id, req.run_id, req.project_id,
             req.expires_in_hours, req.branding,
         )
+    except WorkspaceLimitExceeded as error:
+        raise HTTPException(status_code=429, detail=str(error))
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
     await _audit(context, "report_share.created", "report_share", share.id, share.project_id, {"run_id": share.run_id, "expires_at": share.expires_at.isoformat()})
@@ -642,6 +798,19 @@ async def create_run(req: RunRequest, context: Optional[AuthContext] = Depends(g
         raise HTTPException(status_code=400, detail="Workspace runs must use a registered dataset_id.")
     if req.dataset_id:
         _require_dataset_access(req.dataset_id, context, write=True)
+        if context is not None:
+            try:
+                await asyncio.to_thread(
+                    _usage_service.assert_run_capacity,
+                    context.workspace_id,
+                    req.dataset_id,
+                    req.dataset_version_id,
+                    2,
+                )
+            except WorkspaceLimitExceeded as error:
+                raise HTTPException(status_code=429, detail=str(error))
+            except ValueError as error:
+                raise HTTPException(status_code=400, detail=str(error))
     examples = None
     if req.dataset_path:
         try:
@@ -738,6 +907,8 @@ async def create_run(req: RunRequest, context: Optional[AuthContext] = Depends(g
                 "provider": evaluator_provider_name,
                 "model": evaluator_model_name,
                 "connection_id": req.evaluator_connection_id,
+                "base_url": evaluator_base_url,
+                "allow_unauthenticated": evaluator_allow_unauthenticated,
             },
             "judge_prompt_template": req.judge_prompt_template,
             "template_execution": {"timeout_seconds": req.timeout_seconds},
@@ -755,26 +926,6 @@ async def create_run(req: RunRequest, context: Optional[AuthContext] = Depends(g
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-
-    async def _background_run():
-        try:
-            async with _single_execution_worker:
-                await asyncio.to_thread(
-                    lambda: asyncio.run(
-                        runner.run_evaluation(
-                            dataset_path=req.dataset_path,
-                            examples=examples,
-                            dataset_id=req.dataset_id,
-                            dataset_version_id=req.dataset_version_id,
-                            run_id=run_id,
-                        )
-                    )
-                )
-        except Exception as e:
-            log.error("background_run_failed", error=str(e))
-            await asyncio.to_thread(runner._mark_run_failed, run_id, e)
-
-    asyncio.create_task(_background_run())
 
     project_id = _require_dataset_access(req.dataset_id, context).project_id if req.dataset_id else None
     await _audit(context, "run.launched", "evaluation_run", run_id, project_id, {"simulated": runner._is_simulated()})
@@ -797,6 +948,15 @@ async def cancel_run(run_id: str, context: Optional[AuthContext] = Depends(get_a
     return await get_run(run_id, context)
 
 
+@app.post("/runs/{run_id}/retry-now", response_model=RunStatusResponse)
+async def retry_run_now(run_id: str, context: Optional[AuthContext] = Depends(get_auth_context)):
+    run = _require_run_access(run_id, context, write=True)
+    if not await asyncio.to_thread(_queue_worker.retry_now, "evaluation_run", run_id):
+        raise HTTPException(status_code=409, detail="Only queued, failed, or interrupted runs can be retried")
+    await _audit(context, "run.retry_requested", "evaluation_run", run_id, run.project_id)
+    return await get_run(run_id, context)
+
+
 @app.get("/runs/{run_id}", response_model=RunStatusResponse)
 async def get_run(run_id: str, context: Optional[AuthContext] = Depends(get_auth_context)):
     _require_run_access(run_id, context)
@@ -814,6 +974,12 @@ async def get_run(run_id: str, context: Optional[AuthContext] = Depends(get_auth
         configuration_verified = run.configuration_verified
         project_id = run.project_id
         is_baseline = run.is_baseline
+        attempt_count = run.attempt_count
+        max_attempts = run.max_attempts
+        next_attempt_at = run.next_attempt_at
+        cancellation_requested_at = run.cancellation_requested_at
+        worker_id = run.worker_id
+        last_transient_error = run.last_transient_error
 
     evaluator_metrics = None
     if status in {RunStatus.RUNNING, RunStatus.COMPLETED, RunStatus.INTERRUPTED}:
@@ -847,17 +1013,26 @@ async def get_run(run_id: str, context: Optional[AuthContext] = Depends(get_auth
         configuration_verified=configuration_verified,
         project_id=project_id,
         is_baseline=is_baseline,
+        attempt_count=attempt_count,
+        max_attempts=max_attempts,
+        next_attempt_at=next_attempt_at,
+        cancellation_requested_at=cancellation_requested_at,
+        worker_id=worker_id,
+        last_transient_error=last_transient_error,
+        queue_position=_queue_position(EvaluationRunDB, run_id),
     )
 
 
 @app.get("/runs", response_model=RunsListResponse)
-async def list_runs(baseline_only: bool = Query(default=False, description="List only marked baselines"), context: Optional[AuthContext] = Depends(get_auth_context)):
+async def list_runs(baseline_only: bool = Query(default=False, description="List only marked baselines"), status: Optional[RunStatus] = Query(default=None), context: Optional[AuthContext] = Depends(get_auth_context)):
     with get_db() as db:
         query = db.query(EvaluationRunDB)
         if context is not None:
             query = query.join(ProjectDB, EvaluationRunDB.project_id == ProjectDB.id).filter(ProjectDB.workspace_id == context.workspace_id)
         if baseline_only:
             query = query.filter(EvaluationRunDB.is_baseline == True)
+        if status:
+            query = query.filter(EvaluationRunDB.status == status.value)
         db_runs = query.order_by(EvaluationRunDB.created_at.desc()).all()
         runs = [
             RunListItem(
@@ -867,6 +1042,11 @@ async def list_runs(baseline_only: bool = Query(default=False, description="List
                 is_simulated=db_run.is_simulated,
                 project_id=db_run.project_id,
                 is_baseline=db_run.is_baseline,
+                attempt_count=db_run.attempt_count,
+                max_attempts=db_run.max_attempts,
+                next_attempt_at=db_run.next_attempt_at,
+                cancellation_requested_at=db_run.cancellation_requested_at,
+                queue_position=_queue_position(EvaluationRunDB, db_run.id),
             )
             for db_run in db_runs
         ]
@@ -1040,6 +1220,11 @@ async def get_project_dashboard(project_id: str, context: Optional[AuthContext] 
 @app.post("/projects", response_model=ProjectResponse, status_code=201)
 async def create_project(req: ProjectCreateRequest, context: Optional[AuthContext] = Depends(get_auth_context)):
     _require_role(context, WRITE_ROLES)
+    if context is not None:
+        try:
+            await asyncio.to_thread(_usage_service.assert_capacity, context.workspace_id, active_projects=1)
+        except WorkspaceLimitExceeded as error:
+            raise HTTPException(status_code=429, detail=str(error))
     project = await asyncio.to_thread(
         _project_service.create_project, req.name, req.client_name, req.description, req.tags,
         context.workspace_id if context else None,
@@ -1108,6 +1293,10 @@ async def create_dataset(req: DatasetCreateRequest, context: Optional[AuthContex
         if not req.project_id:
             raise HTTPException(status_code=400, detail="Workspace datasets must be assigned to a project.")
         _require_project_access(req.project_id, context, write=True)
+        try:
+            await asyncio.to_thread(_usage_service.assert_capacity, context.workspace_id, storage_bytes=len(req.content.encode("utf-8")))
+        except WorkspaceLimitExceeded as error:
+            raise HTTPException(status_code=429, detail=str(error))
     try:
         dataset = await asyncio.to_thread(
             _dataset_service.create_dataset,
@@ -1138,6 +1327,11 @@ async def upload_dataset(
             raise HTTPException(status_code=400, detail="Workspace datasets must be assigned to a project.")
         _require_project_access(project_id, context, write=True)
     file_content = await file.read()
+    if context is not None:
+        try:
+            await asyncio.to_thread(_usage_service.assert_capacity, context.workspace_id, storage_bytes=len(file_content))
+        except WorkspaceLimitExceeded as error:
+            raise HTTPException(status_code=429, detail=str(error))
     tag_list = [t.strip() for t in tags.split(",")] if tags else None
     try:
         dataset = await asyncio.to_thread(
@@ -1159,6 +1353,10 @@ async def upload_dataset(
 async def add_dataset_version(dataset_id: str, req: DatasetAddVersionRequest, context: Optional[AuthContext] = Depends(get_auth_context)):
     if context is not None:
         _require_dataset_access(dataset_id, context, write=True)
+        try:
+            await asyncio.to_thread(_usage_service.assert_capacity, context.workspace_id, storage_bytes=len(req.content.encode("utf-8")))
+        except WorkspaceLimitExceeded as error:
+            raise HTTPException(status_code=429, detail=str(error))
     try:
         version = await asyncio.to_thread(
             _dataset_service.add_version,
@@ -1216,6 +1414,19 @@ async def create_pairwise_run(req: PairwiseRunRequest, context: Optional[AuthCon
         raise HTTPException(status_code=400, detail="Workspace runs must use a registered dataset_id.")
     if req.dataset_id:
         _require_dataset_access(req.dataset_id, context, write=True)
+        if context is not None:
+            try:
+                await asyncio.to_thread(
+                    _usage_service.assert_run_capacity,
+                    context.workspace_id,
+                    req.dataset_id,
+                    req.dataset_version_id,
+                    3,
+                )
+            except WorkspaceLimitExceeded as error:
+                raise HTTPException(status_code=429, detail=str(error))
+            except ValueError as error:
+                raise HTTPException(status_code=400, detail=str(error))
     examples = None
     if req.dataset_path:
         try:
@@ -1315,6 +1526,8 @@ async def create_pairwise_run(req: PairwiseRunRequest, context: Optional[AuthCon
                 "provider": judge_provider_name,
                 "model": judge_model_name,
                 "connection_id": req.judge_connection_id,
+                "base_url": judge_base_url,
+                "allow_unauthenticated": judge_allow_unauthenticated,
             },
             "judge_prompt_template": req.judge_prompt_template,
         },
@@ -1330,26 +1543,6 @@ async def create_pairwise_run(req: PairwiseRunRequest, context: Optional[AuthCon
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    async def _background_pairwise_run():
-        try:
-            async with _single_execution_worker:
-                await asyncio.to_thread(
-                    lambda: asyncio.run(
-                        runner.run_pairwise_evaluation(
-                            dataset_path=req.dataset_path,
-                            examples=examples,
-                            dataset_id=req.dataset_id,
-                            dataset_version_id=req.dataset_version_id,
-                            run_id=run_id,
-                        )
-                    )
-                )
-        except Exception as e:
-            log.error("background_pairwise_run_failed", error=str(e))
-            await asyncio.to_thread(runner._mark_run_failed, run_id, e)
-
-    asyncio.create_task(_background_pairwise_run())
-
     project_id = _require_dataset_access(req.dataset_id, context).project_id if req.dataset_id else None
     await _audit(context, "pairwise_run.launched", "pairwise_run", run_id, project_id, {"simulated": runner._is_simulated()})
     return PairwiseRunResponse(
@@ -1357,6 +1550,31 @@ async def create_pairwise_run(req: PairwiseRunRequest, context: Optional[AuthCon
         status=RunStatus.QUEUED,
         is_simulated=runner._is_simulated(),
     )
+
+
+@app.post("/pairwise-runs/{run_id}/cancel", response_model=PairwiseRunStatusResponse)
+async def cancel_pairwise_run(run_id: str, context: Optional[AuthContext] = Depends(get_auth_context)):
+    run = _require_pairwise_run_access(run_id, context, write=True)
+    with get_db() as db:
+        record = db.query(PairwiseRunDB).filter(PairwiseRunDB.id == run_id).first()
+        if record.status not in {RunStatus.QUEUED.value, RunStatus.RUNNING.value}:
+            raise HTTPException(status_code=409, detail="Only queued or running runs can be cancelled")
+        record.cancellation_requested_at = datetime.now(timezone.utc)
+        if record.status == RunStatus.QUEUED.value:
+            record.status = RunStatus.INTERRUPTED.value
+            record.completed_at = datetime.now(timezone.utc)
+        db.commit()
+    await _audit(context, "pairwise_run.cancellation_requested", "pairwise_run", run_id, run.project_id)
+    return await get_pairwise_run(run_id, context=context)
+
+
+@app.post("/pairwise-runs/{run_id}/retry-now", response_model=PairwiseRunStatusResponse)
+async def retry_pairwise_run_now(run_id: str, context: Optional[AuthContext] = Depends(get_auth_context)):
+    run = _require_pairwise_run_access(run_id, context, write=True)
+    if not await asyncio.to_thread(_queue_worker.retry_now, "pairwise_run", run_id):
+        raise HTTPException(status_code=409, detail="Only queued, failed, or interrupted runs can be retried")
+    await _audit(context, "pairwise_run.retry_requested", "pairwise_run", run_id, run.project_id)
+    return await get_pairwise_run(run_id, context=context)
 
 
 @app.get("/pairwise-runs/{run_id}", response_model=PairwiseRunStatusResponse)
@@ -1377,6 +1595,12 @@ async def get_pairwise_run(run_id: str, include_comparisons: bool = Query(defaul
         run_configuration = run.run_configuration
         configuration_verified = run.configuration_verified
         project_id = run.project_id
+        attempt_count = run.attempt_count
+        max_attempts = run.max_attempts
+        next_attempt_at = run.next_attempt_at
+        cancellation_requested_at = run.cancellation_requested_at
+        worker_id = run.worker_id
+        last_transient_error = run.last_transient_error
 
     pw_metrics = None
     comparisons = None
@@ -1420,15 +1644,24 @@ async def get_pairwise_run(run_id: str, include_comparisons: bool = Query(defaul
         run_configuration=run_configuration,
         configuration_verified=configuration_verified,
         project_id=project_id,
+        attempt_count=attempt_count,
+        max_attempts=max_attempts,
+        next_attempt_at=next_attempt_at,
+        cancellation_requested_at=cancellation_requested_at,
+        worker_id=worker_id,
+        last_transient_error=last_transient_error,
+        queue_position=_queue_position(PairwiseRunDB, run_id),
     )
 
 
 @app.get("/pairwise-runs", response_model=PairwiseRunsListResponse)
-async def list_pairwise_runs(context: Optional[AuthContext] = Depends(get_auth_context)):
+async def list_pairwise_runs(status: Optional[RunStatus] = Query(default=None), context: Optional[AuthContext] = Depends(get_auth_context)):
     with get_db() as db:
         query = db.query(PairwiseRunDB)
         if context is not None:
             query = query.join(ProjectDB, PairwiseRunDB.project_id == ProjectDB.id).filter(ProjectDB.workspace_id == context.workspace_id)
+        if status:
+            query = query.filter(PairwiseRunDB.status == status.value)
         db_runs = query.order_by(PairwiseRunDB.created_at.desc()).all()
         runs = [
             PairwiseRunListItem(
@@ -1439,6 +1672,11 @@ async def list_pairwise_runs(context: Optional[AuthContext] = Depends(get_auth_c
                 created_at=db_run.created_at,
                 is_simulated=db_run.is_simulated,
                 project_id=db_run.project_id,
+                attempt_count=db_run.attempt_count,
+                max_attempts=db_run.max_attempts,
+                next_attempt_at=db_run.next_attempt_at,
+                cancellation_requested_at=db_run.cancellation_requested_at,
+                queue_position=_queue_position(PairwiseRunDB, db_run.id),
             )
             for db_run in db_runs
         ]

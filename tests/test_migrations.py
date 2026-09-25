@@ -105,13 +105,19 @@ def test_migration_creates_a_fresh_database(tmp_path):
     _upgrade(database_path)
 
     inspector = inspect(create_engine(f"sqlite:///{database_path}"))
-    assert {"workspaces", "users", "user_sessions", "workspace_memberships", "provider_connections", "evaluation_templates", "report_shares", "audit_events", "workspace_usage_snapshots", "activation_events", "projects", "datasets", "dataset_versions", "evaluation_runs", "evaluation_results", "pairwise_runs", "pairwise_comparisons"} <= set(inspector.get_table_names())
+    assert {"workspaces", "users", "user_sessions", "workspace_memberships", "provider_connections", "evaluation_templates", "report_shares", "audit_events", "workspace_usage_snapshots", "activation_events", "evaluation_schedules", "schedule_executions", "worker_states", "projects", "datasets", "dataset_versions", "evaluation_runs", "evaluation_results", "pairwise_runs", "pairwise_comparisons"} <= set(inspector.get_table_names())
     assert {column["name"] for column in inspector.get_columns("evaluation_results")} >= {"outcome", "error_message"}
     assert {column["name"] for column in inspector.get_columns("evaluation_runs")} >= {
-        "run_configuration_json", "configuration_verified", "project_id", "is_baseline"
+        "run_configuration_json", "configuration_verified", "project_id", "is_baseline",
+        "attempt_count", "max_attempts", "next_attempt_at", "cancellation_requested_at",
+        "worker_claimed_at", "worker_id", "last_transient_error",
     }
     assert next(column for column in inspector.get_columns("evaluation_results") if column["name"] == "score")["nullable"]
     assert "workspace_id" in {column["name"] for column in inspector.get_columns("projects")}
+    assert {column["name"] for column in inspector.get_columns("pairwise_runs")} >= {
+        "attempt_count", "max_attempts", "next_attempt_at", "cancellation_requested_at",
+        "worker_claimed_at", "worker_id", "last_transient_error",
+    }
     assert {"plan", "billing_status", "trial_ends_at", "invoice_contact_email", "limits_json"} <= {
         column["name"] for column in inspector.get_columns("workspaces")
     }

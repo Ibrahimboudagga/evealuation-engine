@@ -157,6 +157,56 @@ class TemplateLaunchRequest(BaseModel):
     dataset_version_id: Optional[str] = None
 
 
+class ScheduleCreateRequest(BaseModel):
+    template_id: str
+    dataset_id: str
+    dataset_version_id: str
+    frequency: Literal["daily", "weekly"]
+    next_execution_at: Optional[datetime] = None
+
+
+class ScheduleActiveRequest(BaseModel):
+    active: bool
+
+
+class ScheduleExecutionResponse(BaseModel):
+    id: str
+    run_id: Optional[str] = None
+    scheduled_for: datetime
+    created_at: datetime
+    status: str
+    error_message: Optional[str] = None
+
+
+class ScheduleResponse(BaseModel):
+    id: str
+    template_id: str
+    dataset_id: str
+    dataset_version_id: str
+    frequency: Literal["daily", "weekly"]
+    next_execution_at: datetime
+    last_executed_at: Optional[datetime] = None
+    active: bool
+    last_error: Optional[str] = None
+    created_at: datetime
+    executions: List[ScheduleExecutionResponse] = Field(default_factory=list)
+
+
+class WorkspaceLimitsRequest(BaseModel):
+    """Monthly plan limits. A null value removes that particular cap."""
+
+    limits: Dict[str, Optional[int]] = Field(default_factory=dict)
+
+
+class WorkspaceUsageResponse(BaseModel):
+    period_start: datetime
+    period_end: datetime
+    usage: Dict[str, int]
+    limits: Dict[str, int]
+    remaining: Dict[str, Optional[int]]
+    snapshot_created_at: Optional[datetime] = None
+
+
 class ReportShareCreateRequest(BaseModel):
     run_id: Optional[str] = None
     project_id: Optional[str] = None
@@ -225,6 +275,7 @@ class HealthResponse(BaseModel):
     database_backend: str
     issues: List[str] = Field(default_factory=list)
     backup_guidance_url: str
+    worker: Optional[Dict[str, Any]] = None
 
 
 class EvaluatorMetric(BaseModel):
@@ -255,6 +306,13 @@ class RunStatusResponse(BaseModel):
     configuration_verified: bool = False
     project_id: Optional[str] = None
     is_baseline: bool = False
+    attempt_count: int = 0
+    max_attempts: int = 3
+    next_attempt_at: Optional[datetime] = None
+    cancellation_requested_at: Optional[datetime] = None
+    worker_id: Optional[str] = None
+    last_transient_error: Optional[str] = None
+    queue_position: Optional[int] = None
 
 
 class RunListItem(BaseModel):
@@ -265,6 +323,11 @@ class RunListItem(BaseModel):
     is_simulated: bool = False
     project_id: Optional[str] = None
     is_baseline: bool = False
+    attempt_count: int = 0
+    max_attempts: int = 3
+    next_attempt_at: Optional[datetime] = None
+    cancellation_requested_at: Optional[datetime] = None
+    queue_position: Optional[int] = None
 
 
 class RunsListResponse(BaseModel):
@@ -540,6 +603,13 @@ class PairwiseRunStatusResponse(BaseModel):
     run_configuration: Optional[Dict[str, Any]] = None
     configuration_verified: bool = False
     project_id: Optional[str] = None
+    attempt_count: int = 0
+    max_attempts: int = 3
+    next_attempt_at: Optional[datetime] = None
+    cancellation_requested_at: Optional[datetime] = None
+    worker_id: Optional[str] = None
+    last_transient_error: Optional[str] = None
+    queue_position: Optional[int] = None
 
 
 class PairwiseRunListItem(BaseModel):
@@ -551,6 +621,11 @@ class PairwiseRunListItem(BaseModel):
     created_at: Optional[datetime] = None
     is_simulated: bool = False
     project_id: Optional[str] = None
+    attempt_count: int = 0
+    max_attempts: int = 3
+    next_attempt_at: Optional[datetime] = None
+    cancellation_requested_at: Optional[datetime] = None
+    queue_position: Optional[int] = None
 
 
 class PairwiseRunsListResponse(BaseModel):
