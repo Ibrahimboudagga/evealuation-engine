@@ -32,6 +32,9 @@ from app.api.schemas import (
     BillingAccountUpdateRequest,
     BillingAccountResponse,
     ActivationFunnelResponse,
+    NotificationSettingsRequest,
+    NotificationSettingsResponse,
+    AdminConsoleResponse,
     ReportShareCreateRequest,
     ReportShareResponse,
     ProjectDashboardResponse,
@@ -98,6 +101,7 @@ from app.services.schedule_service import ScheduleService
 from app.services.usage_service import UsageService, WorkspaceLimitExceeded
 from app.services.billing_service import BillingService
 from app.services.activation_service import ActivationService
+from app.services.notification_service import NotificationService
 from app.config import deployment_health, require_production_configuration
 from app.schemas.outcomes import EvaluationOutcome, RunStatus
 
@@ -120,6 +124,7 @@ _schedule_service = ScheduleService()
 _usage_service = UsageService()
 _billing_service = BillingService()
 _activation_service = ActivationService()
+_notification_service = NotificationService()
 
 
 async def get_auth_context(
@@ -381,6 +386,22 @@ async def health_check():
     return HealthResponse(**health)
 
 
+async def _owner_health() -> dict:
+    """Build the same safe operational health payload for the owner console."""
+    health = deployment_health()
+    if not await asyncio.to_thread(database_is_reachable):
+        health["issues"].append("Database is not reachable.")
+        health["status"] = "degraded"
+    health["worker"] = await asyncio.to_thread(_queue_worker.health)
+    if health["worker"]["status"] in {"unstarted", "stale"}:
+        health["issues"].append(f"Evaluation worker status is {health['worker']['status']}.")
+        health["status"] = "degraded"
+    if health["worker"]["overdue_schedule_count"]:
+        health["issues"].append("One or more active schedules are overdue.")
+        health["status"] = "degraded"
+    return health
+
+
 @app.get("/setup/status")
 async def setup_status():
     """Public bootstrap status used only by the first-run setup wizard."""
@@ -507,6 +528,7 @@ async def add_workspace_member(
         raise HTTPException(status_code=403, detail=str(error))
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
+    await _audit(context, "member.added", "user", member.user_id, metadata={"role": member.role})
     return WorkspaceMemberResponse(
         user_id=member.user_id, email=member.email, workspace_id=member.workspace_id,
         role=member.role, api_token=token or None,
@@ -574,6 +596,7 @@ async def create_provider_connection(
         )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
+    await _audit(context, "provider_connection.created", "provider_connection", connection.id, metadata={"provider": connection.provider, "name": connection.name})
     return _connection_to_response(connection)
 
 
@@ -795,6 +818,66 @@ async def get_activation_funnel(context: Optional[AuthContext] = Depends(get_aut
     return ActivationFunnelResponse(**(await asyncio.to_thread(_activation_service.funnel, context.workspace_id)))
 
 
+@app.get("/workspace/notifications", response_model=NotificationSettingsResponse)
+async def get_notification_settings(context: Optional[AuthContext] = Depends(get_auth_context)):
+    if context is None:
+        raise HTTPException(status_code=401, detail="Workspace authentication is required")
+    _require_role(context, OWNER_ROLES)
+    return NotificationSettingsResponse(**(await asyncio.to_thread(_notification_service.get, context.workspace_id)))
+
+
+@app.put("/workspace/notifications", response_model=NotificationSettingsResponse)
+async def update_notification_settings(
+    req: NotificationSettingsRequest, context: Optional[AuthContext] = Depends(get_auth_context)
+):
+    if context is None:
+        raise HTTPException(status_code=401, detail="Workspace authentication is required")
+    _require_role(context, OWNER_ROLES)
+    try:
+        settings = await asyncio.to_thread(_notification_service.update, context.workspace_id, req.model_dump())
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    await _audit(
+        context, "workspace.notifications_updated", "workspace", context.workspace_id,
+        metadata={"enabled": settings["enabled"], "recipient_count": len(settings["recipients"]), "events": settings["events"]},
+    )
+    return NotificationSettingsResponse(**settings)
+
+
+@app.get("/workspace/admin-console", response_model=AdminConsoleResponse)
+async def get_admin_console(context: Optional[AuthContext] = Depends(get_auth_context)):
+    """Return the owner account overview without exposing provider credentials."""
+    if context is None:
+        raise HTTPException(status_code=401, detail="Workspace authentication is required")
+    _require_role(context, OWNER_ROLES)
+    members, projects, templates, connections, usage, billing, notifications, events, health = await asyncio.gather(
+        asyncio.to_thread(_identity_service.members, context.workspace_id),
+        asyncio.to_thread(_project_service.list_projects, context.workspace_id),
+        asyncio.to_thread(_agency_service.list_templates, context.workspace_id),
+        asyncio.to_thread(_provider_connection_service.list, context.workspace_id),
+        asyncio.to_thread(_usage_service.overview, context.workspace_id),
+        asyncio.to_thread(_billing_service.account, context.workspace_id),
+        asyncio.to_thread(_notification_service.get, context.workspace_id),
+        asyncio.to_thread(_operations_service.list_events, context.workspace_id, None, 50),
+        _owner_health(),
+    )
+    return AdminConsoleResponse(
+        members=[WorkspaceMemberResponse(user_id=m.user_id, email=m.user.email, workspace_id=m.workspace_id, role=m.role) for m in members],
+        projects=[_project_to_response(project).model_dump() for project in projects],
+        templates=[_template_to_response(template).model_dump() for template in templates],
+        provider_connections=[_connection_to_response(connection) for connection in connections],
+        usage=WorkspaceUsageResponse(**usage),
+        billing=BillingAccountResponse(**billing),
+        notifications=NotificationSettingsResponse(**notifications),
+        health=HealthResponse(**health),
+        audit_events=[AuditEventResponse(
+            id=event.id, action=event.action, entity_type=event.entity_type, entity_id=event.entity_id,
+            project_id=event.project_id, actor_email=event.actor_email, metadata=event.metadata_dict,
+            created_at=event.created_at,
+        ) for event in events],
+    )
+
+
 @app.post("/report-shares", response_model=ReportShareResponse, status_code=201)
 async def create_report_share(
     req: ReportShareCreateRequest,
@@ -846,6 +929,7 @@ async def seed_agency_demo(context: Optional[AuthContext] = Depends(get_auth_con
     _require_role(context, WRITE_ROLES)
     seeded = await asyncio.to_thread(_demo_seed_service.seed, context.workspace_id if context else None)
     if context is not None:
+        await _audit(context, "demo.seeded", "workspace", context.workspace_id, seeded["project_id"])
         for milestone in ("demo_seeded", "first_project", "first_dataset"):
             await asyncio.to_thread(_activation_service.record_first, context.workspace_id, milestone)
     return DemoSeedResponse(**seeded)

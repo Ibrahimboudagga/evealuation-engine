@@ -106,6 +106,8 @@ def test_migration_creates_a_fresh_database(tmp_path):
 
     inspector = inspect(create_engine(f"sqlite:///{database_path}"))
     assert {"workspaces", "users", "user_sessions", "workspace_memberships", "provider_connections", "evaluation_templates", "report_shares", "audit_events", "workspace_usage_snapshots", "activation_events", "evaluation_schedules", "schedule_executions", "worker_states", "projects", "datasets", "dataset_versions", "evaluation_runs", "evaluation_results", "pairwise_runs", "pairwise_comparisons"} <= set(inspector.get_table_names())
+    workspace_columns = {column["name"] for column in inspector.get_columns("workspaces")}
+    assert "notification_settings_json" in workspace_columns
     assert {column["name"] for column in inspector.get_columns("evaluation_results")} >= {"outcome", "error_message"}
     assert {column["name"] for column in inspector.get_columns("evaluation_runs")} >= {
         "run_configuration_json", "configuration_verified", "project_id", "is_baseline",

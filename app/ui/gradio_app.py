@@ -593,6 +593,51 @@ async def get_activation_funnel():
         return {"error": str(error)}
 
 
+async def get_admin_console():
+    """Load the owner-only account summary used by the agency console."""
+    try:
+        async with httpx.AsyncClient(timeout=30.0, headers=_api_headers()) as client:
+            response = await client.get(f"{API_BASE}/workspace/admin-console")
+            response.raise_for_status()
+        return response.json()
+    except httpx.HTTPStatusError as error:
+        return {"error": f"HTTP {error.response.status_code}: {error.response.text}"}
+    except Exception as error:
+        return {"error": str(error)}
+
+
+async def save_notification_settings(enabled, recipients_text, events):
+    recipients = [item.strip() for item in (recipients_text or "").split(",") if item.strip()]
+    payload = {"enabled": bool(enabled), "recipients": recipients, "events": events or []}
+    try:
+        async with httpx.AsyncClient(timeout=15.0, headers=_api_headers()) as client:
+            response = await client.put(f"{API_BASE}/workspace/notifications", json=payload)
+            response.raise_for_status()
+        return response.json()
+    except httpx.HTTPStatusError as error:
+        return {"error": f"HTTP {error.response.status_code}: {error.response.text}"}
+    except Exception as error:
+        return {"error": str(error)}
+
+
+async def add_workspace_member(email, display_name, role, initial_password):
+    if not email or not display_name:
+        return {"error": "Enter a member email and display name."}
+    payload = {
+        "email": email.strip(), "display_name": display_name.strip(), "role": role,
+        "initial_password": initial_password or None,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=15.0, headers=_api_headers()) as client:
+            response = await client.post(f"{API_BASE}/workspace/members", json=payload)
+            response.raise_for_status()
+        return {"message": "Member added. Save any returned one-time token securely.", "member": response.json()}
+    except httpx.HTTPStatusError as error:
+        return {"error": f"HTTP {error.response.status_code}: {error.response.text}"}
+    except Exception as error:
+        return {"error": str(error)}
+
+
 async def create_report_share(run_id, hours, agency_name, report_title):
     if not run_id:
         return {"error": "Enter a run ID to share."}
@@ -797,6 +842,77 @@ with gr.Blocks(title="LLM Evaluation Engine") as demo:
         login_button = gr.Button("Sign In", variant="primary")
         login_output = gr.JSON(label="Personal Session")
         login_button.click(fn=sign_in_user, inputs=[login_email, login_password, login_workspace], outputs=login_output)
+
+    with gr.Tab("Agency Admin Console"):
+        gr.Markdown("""# Agency Admin Console
+This owner-only page brings account operations into one place. The overview includes members, projects, templates, provider connections, monthly usage, plan and trial status, worker health, notification preferences, and recent audit history. Provider credentials and report links are never included.""")
+        admin_refresh = gr.Button("Refresh Account Overview", variant="primary")
+        admin_overview = gr.JSON(label="Account Overview")
+        with gr.Row():
+            with gr.Column():
+                gr.Markdown("### Quick setup")
+                admin_seed_demo = gr.Button("Seed Agency Demo")
+                admin_seed_output = gr.JSON(label="Demo Setup")
+            with gr.Column():
+                gr.Markdown("### Add member")
+                admin_member_email = gr.Textbox(label="Member Email")
+                admin_member_name = gr.Textbox(label="Display Name")
+                admin_member_role = gr.Dropdown(label="Role", choices=["owner", "editor", "viewer", "client_viewer"], value="editor")
+                admin_member_password = gr.Textbox(label="Initial Password (optional, 12+ chars)", type="password")
+                admin_member_add = gr.Button("Add Member")
+                admin_member_output = gr.JSON(label="Member Result")
+            with gr.Column():
+                gr.Markdown("### Create project")
+                admin_project_name = gr.Textbox(label="Project / Product Name")
+                admin_project_client = gr.Textbox(label="Client Name")
+                admin_project_description = gr.Textbox(label="Description", lines=2)
+                admin_project_tags = gr.Textbox(label="Tags (comma-separated)")
+                admin_project_create = gr.Button("Create Project")
+                admin_project_output = gr.JSON(label="Project Result")
+        with gr.Row():
+            with gr.Column():
+                gr.Markdown("### Launch saved template")
+                admin_launch_template = gr.Dropdown(label="Saved Template", choices=[])
+                admin_launch_dataset = gr.Dropdown(label="Dataset", choices=[])
+                admin_launch_version = gr.Dropdown(label="Dataset Version", choices=[])
+                admin_launch_refresh = gr.Button("Refresh Template Choices")
+                admin_launch_button = gr.Button("Launch Template Evaluation", variant="primary")
+                admin_launch_output = gr.JSON(label="Launch Result")
+            with gr.Column():
+                gr.Markdown("### Notifications")
+                admin_notifications_enabled = gr.Checkbox(label="Enable notifications", value=False)
+                admin_notification_recipients = gr.Textbox(label="Recipient emails (comma-separated)")
+                admin_notification_events = gr.CheckboxGroup(
+                    label="Notify for", choices=["run_completed", "run_failed", "run_regressed", "report_expiring"],
+                    value=["run_completed", "run_failed", "run_regressed", "report_expiring"],
+                )
+                admin_notifications_save = gr.Button("Save Notification Preferences")
+                admin_notifications_output = gr.JSON(label="Notification Preferences")
+        admin_refresh.click(fn=get_admin_console, outputs=admin_overview)
+        admin_seed_demo.click(fn=seed_agency_demo, outputs=admin_seed_output).then(fn=get_admin_console, outputs=admin_overview)
+        admin_member_add.click(
+            fn=add_workspace_member,
+            inputs=[admin_member_email, admin_member_name, admin_member_role, admin_member_password],
+            outputs=admin_member_output,
+        ).then(fn=get_admin_console, outputs=admin_overview)
+        admin_project_create.click(
+            fn=create_project,
+            inputs=[admin_project_name, admin_project_client, admin_project_description, admin_project_tags],
+            outputs=admin_project_output,
+        ).then(fn=get_admin_console, outputs=admin_overview)
+        admin_launch_refresh.click(fn=template_choice_update, outputs=admin_launch_template)
+        admin_launch_refresh.click(fn=dataset_choice_update, outputs=admin_launch_dataset)
+        admin_launch_dataset.change(fn=refresh_version_choices, inputs=admin_launch_dataset, outputs=admin_launch_version)
+        admin_launch_button.click(
+            fn=launch_template,
+            inputs=[admin_launch_template, admin_launch_dataset, admin_launch_version],
+            outputs=admin_launch_output,
+        ).then(fn=get_admin_console, outputs=admin_overview)
+        admin_notifications_save.click(
+            fn=save_notification_settings,
+            inputs=[admin_notifications_enabled, admin_notification_recipients, admin_notification_events],
+            outputs=admin_notifications_output,
+        ).then(fn=get_admin_console, outputs=admin_overview)
 
     with gr.Tab("Provider Connections"):
         gr.Markdown("Workspace owners configure a provider once. The credential is encrypted by the API and is never returned to the browser, reports, or other members.")

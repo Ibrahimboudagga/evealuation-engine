@@ -41,6 +41,11 @@ class OpenAIProvider(BaseProvider):
 
     async def generate(self, prompt: str) -> Tuple[str, Optional[Dict[str, Any]]]:
         if self.is_mock:
+            # Explicit fault injection for a credential-free pilot rehearsal.
+            # This remains demo-mode output and cannot be selected through a
+            # real provider name or model.
+            if self.model_name == "mock-timeout":
+                raise TimeoutError("Mock provider timed out for pilot rehearsal.")
             # If the prompt requests a JSON response (like LLM-as-a-judge), return a valid JSON structure
             if "json" in prompt.lower() or "score" in prompt.lower() or "reason" in prompt.lower():
                 return json.dumps({
