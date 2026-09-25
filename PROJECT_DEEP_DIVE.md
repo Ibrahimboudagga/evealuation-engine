@@ -1,6 +1,6 @@
 # LLM Evaluation Engine: Deep Project Guide
 
-> Repository state covered: feature/queue-retry-foundation, September 2026.
+> Repository state covered: feature/admin-console-pilot-rehearsal, 25 September 2026.
 >
 > This guide explains the product, its technical design, the full evaluation
 > workflow, its data model, operational controls, and the gaps still to close
@@ -55,11 +55,14 @@ mistaken for real model evidence.
 | Dataset version | Immutable snapshot of uploaded JSONL content. | Lets a historical run be reproduced. |
 | Provider connection | Stored provider/model endpoint configuration. | Avoids sharing or repeatedly entering raw API keys. |
 | Template | Reusable evaluation configuration. | Makes standard client evaluations repeatable. |
+| Schedule | A daily or weekly template execution against a fixed dataset version. | Runs a regression suite without manual launch. |
 | Run | One execution of a configuration against a dataset version. | Holds lifecycle, configuration, metrics, and results. |
 | Result | One evaluator's verdict for one example. | Provides evidence behind aggregate quality metrics. |
 | Pairwise comparison | A model-A/model-B judgement for one example. | Supports model selection and controlled comparisons. |
 | Baseline | A completed reference run. | Enables release regression checks. |
 | Report share | Expiring, revocable read-only link. | Lets a client view a report without access to the workspace. |
+| Usage snapshot | Aggregate monthly workspace counters. | Supports pilot limits and future paid plans without storing evaluation content in analytics. |
+| Activation event | A first-use onboarding milestone with timestamp and count. | Shows where an agency stopped onboarding without storing prompts or outputs. |
 
 ## 4. Architecture
 
@@ -134,6 +137,8 @@ The provider factory enforces important safety rules:
 - Unknown provider names are validation errors.
 - Missing required credentials are configuration errors.
 - A mock response needs an explicit mock, dummy, or demo selection.
+- `mock-timeout` is an explicit simulated timeout used only for the pilot retry
+  rehearsal; it is never inferred from a real provider configuration.
 - An unauthenticated compatible endpoint requires explicit compatible provider
   selection and a base URL.
 - A run that uses a simulated candidate or judge is stored as simulated.
@@ -194,6 +199,26 @@ listing.
 Startup reconciliation marks unfinished single-worker runs as interrupted.
 This makes a restart visible to an operator and preserves completed result rows
 for diagnosis.
+
+### Queue, retry, and cancellation
+
+The single worker claims one due queued run at a time. Each single-model and
+pairwise run stores its attempt count, maximum attempts, next retry time,
+current worker claim, cancellation request time, and last retryable error.
+Timeouts, rate limits, and temporary connection/provider failures are retried
+with jittered exponential backoff. Non-transient failures become `failed`; a
+run that exhausts its retry budget also becomes `failed`.
+
+Owners and editors can request cancellation while a run is queued or between
+examples. The worker checks for it before execution and between persisted
+batches, then marks the run `interrupted`. Owners and editors can also request
+an immediate retry for an eligible queued, interrupted, or failed run. Claims,
+retries, cancellations, and exhausted retry budgets are audit events.
+
+Daily and weekly schedules create ordinary queued runs, so they use the same
+lifecycle, coverage rules, retry policy, and reports as a manually submitted
+template. Schedule history records the intended execution time, generated run
+ID, status, and a sanitized error where applicable.
 
 ### Result outcome
 
@@ -310,6 +335,21 @@ A project dashboard aggregates latest runs, baseline/release state, coverage and
 quality trends, and recent sanitized failures. It gives an agency manager a
 client-level health view without opening each individual run.
 
+### Agency Admin Console
+
+The owner-only **Agency Admin Console** brings the account surface into one
+Gradio page. Its safe overview includes members, projects, templates, provider
+connections, monthly usage, plan and trial status, worker health, notification
+preferences, and recent audit events. Connection credentials and report-link
+tokens are never part of this response.
+
+The page provides quick actions to seed the mock demo, add a member, create a
+project, and launch a saved template. Notification preferences allow owners to
+choose recipient email addresses and events such as completed runs, failures,
+regressions, and expiring reports. The settings are preferences only: delivery
+adapters remain a separate integration boundary, so the application does not
+store Slack webhooks or other delivery secrets.
+
 ## 13. Persistence model
 
 | Area | Tables | Purpose |
@@ -318,7 +358,8 @@ client-level health view without opening each individual run.
 | Agency work | projects, datasets, dataset_versions | Client/product grouping and immutable evaluation input. |
 | Evaluation | evaluation_runs, evaluation_results, pairwise_runs, pairwise_comparisons | Lifecycle, configurations, outcomes, scores, explanations, Elo evidence. |
 | Reuse/delivery | provider_connections, evaluation_templates, report_shares | Saved provider configurations, repeatable work, client delivery. |
-| Operations | audit_events, workspace_usage_snapshots, activation_events | Traceability, aggregate usage, privacy-safe activation milestones. |
+| Operations | audit_events, workspace_usage_snapshots, activation_events, evaluation_schedules, schedule_executions, worker_states | Traceability, aggregate usage, privacy-safe activation milestones, recurring work, and worker health. |
+| Account preferences | workspace plan/billing/limits fields and notification settings | Manual-pilot billing, trial control, plan limits, and safe notification configuration. |
 
 Alembic migrations provide ordered schema evolution. Migrations preserve old
 rows and use SQLite batch operations where SQLite's direct ALTER TABLE support
@@ -332,7 +373,8 @@ labelled unverified instead of claiming a false modern outcome.
 | Health/operations | GET /health, GET /setup/status, GET /audit-events, retention routes |
 | Identity/members | /auth/bootstrap, /auth/sign-in, /auth/sign-out, /auth/password, /workspace/members |
 | Connections | GET/POST /provider-connections and DELETE connection route |
-| Templates/sharing | /evaluation-templates, template launch, /report-shares, /shared-reports/{token} |
+| Account controls | /workspace/usage, /workspace/limits, /workspace/billing, /workspace/activation, /workspace/notifications, /workspace/admin-console |
+| Templates/schedules/sharing | /evaluation-templates, template launch, /schedules, /report-shares, /shared-reports/{token} |
 | Demo | POST /demo/seed |
 | Single-model runs | POST /runs, status/list/results/export, baseline/comparison, cancellation |
 | Projects | Project CRUD and project dashboard |
@@ -353,17 +395,27 @@ For local development, SQLite is the default database:
 For a hosted pilot, Docker Compose runs PostgreSQL 16, FastAPI, and Gradio.
 Production configuration requires PostgreSQL and WORKSPACE_ENCRYPTION_KEY.
 Health reporting exposes safe configuration problems and database reachability
-without returning secrets.
+without returning secrets. It includes worker heartbeat, claimed run, queue
+depth, retry and failed-run counts, and overdue-schedule count.
 
 Audit events record important actions with actor identity and safe metadata.
 Retention settings can remove expired shares and old audit entries; current
 retention cleanup intentionally does not remove evaluation data.
 
+`PILOT_REHEARSAL.md` is the operational walkthrough for a clean, isolated
+Compose project. It covers workspace bootstrap, demo seeding, usage limits,
+the `mock-timeout` retry/backoff check, daily scheduling, queue cancellation,
+health and audit checks, activation funnel inspection, export, and a client
+share. Docker Desktop must be running before `docker compose` can create the
+PostgreSQL, API, and UI containers.
+
 ## 16. Testing
 
-The offline suite covers providers, evaluators, runners, lifecycle semantics,
-migrations, datasets, projects, reports, baselines, templates/shares/dashboard,
-audit operations, demo workflow, and user sign-in.
+The offline suite contains 163 tests covering providers, evaluators, runners,
+lifecycle semantics, queue retry/cancellation, schedules, migrations, datasets,
+projects, reports, baselines, templates/shares/dashboard, account limits and
+billing, activation, Admin Console access, audit operations, demo workflow,
+and user sign-in.
 
 tests.fakes.DeterministicFakeProvider supports deterministic successful output,
 valid judge JSON, malformed JSON, and provider exceptions. It never calls a
@@ -383,47 +435,38 @@ failure:
 
 ### Implemented
 
-- Stable database-backed run IDs and lifecycle states.
-- Explicit mock mode and deterministic fake providers.
-- Sanitized generation/evaluation errors and null failed quality fields.
-- Valid-result coverage metrics and error-aware pairwise Elo.
-- Incremental result persistence, timeouts, and restart reconciliation.
-- Dataset upload, validation, versioning, and project association.
-- Workspaces, roles, local sessions, provider connections, templates, report
-  shares, project dashboard, audit log, retention controls, Docker deployment,
-  and seeded demo workflow.
-- Account persistence fields: plan, billing status, trial end, invoice contact,
-  configurable limits JSON, usage snapshots, and activation events.
+- Stable database-backed run IDs, result outcomes, coverage metrics, bounded
+  execution timeouts, incremental persistence, and restart reconciliation.
+- Explicit simulation mode, deterministic fake providers, and the
+  `mock-timeout` fault injector for retry rehearsal.
+- A one-at-a-time queue worker for single and pairwise runs with claims,
+  jittered retry/backoff, cancellation, retry-now, queue position, audit
+  records, and worker health signals.
+- Daily and weekly template schedules with execution history and overdue
+  schedule monitoring.
+- Workspace projects, versioned JSONL datasets, provider connections, reusable
+  templates, roles, local sessions, client-safe shares, exports, dashboards,
+  release checks, retention controls, Docker deployment, and seeded demo data.
+- Workspace usage aggregation and enforceable limits for runs, evaluated cases,
+  provider calls, storage, report shares, and active projects.
+- Billing-ready account data: plan, billing status, trial end, invoice contact,
+  warnings, audits, and a provider-neutral BillingService boundary.
+- Privacy-safe activation milestones and owner activation funnel. They record
+  only event name, timestamp, and count.
+- The owner Admin Console and owner-only notification preferences, with safe
+  responses that exclude credentials and report tokens.
 
-### Foundation only; not yet complete features
+### Required before a production agency SaaS
 
-- Single-model runs have queue metadata: attempt count, maximum attempts, next
-  attempt time, worker claim fields, cancellation request time, and last
-  transient error. A queued run can be cancelled.
-- Account and analytics tables are persisted, but no service yet calculates and
-  enforces limits, generates billing-period snapshots, or serves a funnel.
-
-### Required before production agency SaaS
-
-1. A worker service must claim due runs, classify transient failures, apply
-   jittered exponential backoff, retry safely, expose queue position, and
-   respect cancellation between examples. Pairwise runs need the same support.
-2. Schedules need daily/weekly template execution, execution history, and
-   overdue-schedule monitoring.
-3. Usage and billing need aggregation, limit enforcement, a payment-provider
-   service boundary, and a pilot/manual-invoicing workflow.
-4. CI/CD needs scoped automation keys, release-decision endpoints, signed
-   webhooks, incoming triggers, and a GitHub Actions example.
-5. Branding needs workspace name/logo/color/footer/contact/domain settings,
-   safe validation, previews, and application to reports.
-6. The owner console needs a single place for members, projects, templates,
-   connections, usage, billing, notifications, health, and audit history.
-7. Production operations need durable JSON correlation logs, error reporting,
-   worker monitoring, scheduled backups, restore verification, and incident
-   procedures.
-8. Product analytics needs privacy-safe milestone recording and an internal
-   activation funnel that never stores prompts, outputs, credentials, or report
-   tokens.
+1. Connect actual notification delivery adapters and keep their credentials in
+   the established encrypted/secret-reference boundary.
+2. Finish CI/CD integration: scoped automation keys, signed webhooks, inbound
+   triggers, and a maintained GitHub Actions example.
+3. Complete agency branding across exports and shared reports.
+4. Add production observability integrations, automated backups, restore
+   verification, and documented incident response.
+5. Run the documented Docker/PostgreSQL rehearsal on a host with Docker
+   Desktop or another active container runtime before onboarding client data.
 
 ## 18. Recommended paid-pilot sequence
 
@@ -462,4 +505,27 @@ with client stakeholders.
 | app/ui/gradio_app.py | Gradio operator interface. |
 | tests | Offline regression suite and deterministic fakes. |
 | HOSTED_PILOT_ONBOARDING.md | Hosted-pilot deployment and onboarding checklist. |
+| PILOT_REHEARSAL.md | Clean Docker/PostgreSQL pilot verification runbook. |
 
+## Agent and application scenario extension
+
+The standalone `run_scenarios.py` CLI now supports structured application and
+agent evaluation. Its implementation is in `app/scenarios/`: versioned scenario
+and evidence schemas, deterministic assertions, fixture/HTTP/legal-RAG adapters,
+bounded sequential execution, incremental JSONL persistence, and escaped HTML
+review reports. See [SCENARIO_EVALUATION.md](SCENARIO_EVALUATION.md) for the full
+contract and runnable examples.
+
+Supported checks include output JSON Pointers, required and forbidden tools,
+complete-trace call budgets, citation identifiers, latency/token budgets, and
+the Open SaaS planner's task/subtask/time constraints. A missing required trace
+or measurement produces an inconclusive evaluation with a null score; errors
+do not become low-quality answers. Explicit fixtures always remain simulated.
+
+This extension is not yet connected to database-backed workspace runs, Gradio,
+automatic retries, schedules, usage accounting, or shared report links. Its run
+manifest/results are local artifacts. Live Open SaaS execution needs an
+authenticated staging bridge around its existing Wasp action; the legal adapter
+uses the reference start/status/report endpoints but cannot invent absent tool
+traces. The examples demonstrate simulated executions, not verified live
+performance of either reference project.

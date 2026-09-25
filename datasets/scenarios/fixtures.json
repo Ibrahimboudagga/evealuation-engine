@@ -1,0 +1,23 @@
+{
+  "legal-evidence": {
+    "output": {"notice_days": 30, "explanation": "Synthetic fixture: clause 4 requires 30 days notice."},
+    "tool_calls": [{"name": "retrieve", "status": "succeeded"}],
+    "trace_complete": true,
+    "citation_ids": ["synthetic-contract:section-4"],
+    "total_tokens": 320,
+    "latency_ms": 125,
+    "simulated": true
+  },
+  "saas-planner": {
+    "output": {
+      "tasks": [{"name": "Prepare proposal", "priority": "high"}],
+      "taskItems": [
+        {"taskName": "Prepare proposal", "description": "Review requirements", "time": 0.5},
+        {"taskName": "Prepare proposal", "description": "Draft proposal", "time": 1},
+        {"taskName": "Prepare proposal", "description": "Proofread proposal", "time": 0.5}
+      ]
+    },
+    "latency_ms": 200,
+    "simulated": true
+  }
+}
