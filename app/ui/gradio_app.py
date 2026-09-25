@@ -551,6 +551,48 @@ async def save_workspace_limits(limits_text):
         return {"error": str(error)}
 
 
+async def get_billing_account():
+    try:
+        async with httpx.AsyncClient(timeout=15.0, headers=_api_headers()) as client:
+            response = await client.get(f"{API_BASE}/workspace/billing")
+            response.raise_for_status()
+        return response.json()
+    except httpx.HTTPStatusError as error:
+        return {"error": f"HTTP {error.response.status_code}: {error.response.text}"}
+    except Exception as error:
+        return {"error": str(error)}
+
+
+async def save_billing_account(plan, billing_status, trial_ends_at, invoice_contact_email):
+    payload = {
+        "plan": plan.strip() if plan and plan.strip() else None,
+        "billing_status": billing_status or None,
+        "trial_ends_at": trial_ends_at.strip() if trial_ends_at and trial_ends_at.strip() else None,
+        "invoice_contact_email": invoice_contact_email.strip() if invoice_contact_email and invoice_contact_email.strip() else "",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=15.0, headers=_api_headers()) as client:
+            response = await client.put(f"{API_BASE}/workspace/billing", json=payload)
+            response.raise_for_status()
+        return response.json()
+    except httpx.HTTPStatusError as error:
+        return {"error": f"HTTP {error.response.status_code}: {error.response.text}"}
+    except Exception as error:
+        return {"error": str(error)}
+
+
+async def get_activation_funnel():
+    try:
+        async with httpx.AsyncClient(timeout=15.0, headers=_api_headers()) as client:
+            response = await client.get(f"{API_BASE}/workspace/activation")
+            response.raise_for_status()
+        return response.json()
+    except httpx.HTTPStatusError as error:
+        return {"error": f"HTTP {error.response.status_code}: {error.response.text}"}
+    except Exception as error:
+        return {"error": str(error)}
+
+
 async def create_report_share(run_id, hours, agency_name, report_title):
     if not run_id:
         return {"error": "Enter a run ID to share."}
@@ -855,6 +897,35 @@ with gr.Blocks(title="LLM Evaluation Engine") as demo:
         usage_save = gr.Button("Save Limits")
         usage_refresh.click(fn=get_workspace_usage, outputs=usage_output)
         usage_save.click(fn=save_workspace_limits, inputs=usage_limits, outputs=usage_output)
+
+    with gr.Tab("Account & Billing"):
+        gr.Markdown("Manage a free trial or manual paid pilot. Payment-provider synchronization remains behind the billing service boundary.")
+        with gr.Row():
+            billing_plan = gr.Textbox(label="Plan", value="pilot")
+            billing_status = gr.Dropdown(
+                label="Billing Status",
+                choices=["trial", "active", "manual", "past_due", "cancelled"],
+                value="trial",
+            )
+        with gr.Row():
+            billing_trial_end = gr.Textbox(label="Trial End (ISO 8601, optional)", placeholder="2026-10-01T00:00:00Z")
+            billing_invoice_contact = gr.Textbox(label="Invoice Contact Email (optional)")
+        with gr.Row():
+            billing_refresh = gr.Button("Refresh Account")
+            billing_save = gr.Button("Save Account", variant="primary")
+        billing_output = gr.JSON(label="Billing Account and Trial Warnings")
+        billing_refresh.click(fn=get_billing_account, outputs=billing_output)
+        billing_save.click(
+            fn=save_billing_account,
+            inputs=[billing_plan, billing_status, billing_trial_end, billing_invoice_contact],
+            outputs=billing_output,
+        )
+
+    with gr.Tab("Activation Funnel"):
+        gr.Markdown("Review privacy-safe onboarding milestones. This stores timestamps and aggregate counts only, never prompts, outputs, credentials, or report tokens.")
+        activation_refresh = gr.Button("Refresh Activation Funnel", variant="primary")
+        activation_output = gr.JSON(label="Workspace Activation")
+        activation_refresh.click(fn=get_activation_funnel, outputs=activation_output)
 
     with gr.Tab("Datasets"):
         gr.Markdown("Upload and version JSONL datasets. Assign each dataset to a client project; runs inherit that project.")

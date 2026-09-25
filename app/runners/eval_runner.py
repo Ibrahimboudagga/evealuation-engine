@@ -20,6 +20,7 @@ from app.services.run_configuration import (
     dataset_path_snapshot,
     dataset_version_snapshot,
 )
+from app.services.activation_service import ActivationService
 
 log = structlog.get_logger()
 
@@ -478,6 +479,7 @@ class EvaluationRunner:
                     run.status = RunStatus.COMPLETED.value
                     run.completed_at = datetime.now(timezone.utc)
                 db.commit()
+            ActivationService().record_completed_run(run_id)
         except RunCancellationRequested as error:
             self._mark_run_interrupted(run_id, str(error))
             return run_id

@@ -83,6 +83,9 @@ class ScheduleService:
             db.add(schedule)
             db.commit()
             db.refresh(schedule)
+            # The API response includes history; load the empty relationship
+            # while the session is open so callers receive a safe detached record.
+            _ = list(schedule.executions)
             return schedule
 
     def list(self, workspace_id: str) -> list[EvaluationScheduleDB]:
