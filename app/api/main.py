@@ -29,6 +29,9 @@ from app.api.schemas import (
     ScheduleResponse,
     WorkspaceLimitsRequest,
     WorkspaceUsageResponse,
+    BillingAccountUpdateRequest,
+    BillingAccountResponse,
+    ActivationFunnelResponse,
     ReportShareCreateRequest,
     ReportShareResponse,
     ProjectDashboardResponse,
@@ -93,6 +96,8 @@ from app.services.run_recovery import reconcile_abandoned_runs
 from app.services.queue_worker import QueueWorker
 from app.services.schedule_service import ScheduleService
 from app.services.usage_service import UsageService, WorkspaceLimitExceeded
+from app.services.billing_service import BillingService
+from app.services.activation_service import ActivationService
 from app.config import deployment_health, require_production_configuration
 from app.schemas.outcomes import EvaluationOutcome, RunStatus
 
@@ -113,6 +118,8 @@ _agency_service = AgencyService()
 _operations_service = OperationsService()
 _schedule_service = ScheduleService()
 _usage_service = UsageService()
+_billing_service = BillingService()
+_activation_service = ActivationService()
 
 
 async def get_auth_context(
@@ -610,6 +617,7 @@ async def create_evaluation_template(
     except Exception as error:
         raise HTTPException(status_code=400, detail=str(error))
     await _audit(context, "template.created", "evaluation_template", template.id, metadata={"name": template.name})
+    await asyncio.to_thread(_activation_service.record_first, context.workspace_id, "first_template")
     return _template_to_response(template)
 
 
@@ -683,6 +691,7 @@ async def create_schedule(req: ScheduleCreateRequest, context: Optional[AuthCont
         schedule.id,
         metadata={"template_id": schedule.template_id, "dataset_version_id": schedule.dataset_version_id, "frequency": schedule.frequency},
     )
+    await asyncio.to_thread(_activation_service.record_first, context.workspace_id, "first_recurring_schedule")
     return _schedule_to_response(schedule)
 
 
@@ -738,6 +747,54 @@ async def update_workspace_limits(
     return WorkspaceUsageResponse(**(await asyncio.to_thread(_usage_service.overview, context.workspace_id)))
 
 
+@app.get("/workspace/billing", response_model=BillingAccountResponse)
+async def get_billing_account(context: Optional[AuthContext] = Depends(get_auth_context)):
+    if context is None:
+        raise HTTPException(status_code=401, detail="Workspace authentication is required")
+    _require_role(context, OWNER_ROLES)
+    try:
+        return BillingAccountResponse(**(await asyncio.to_thread(_billing_service.account, context.workspace_id)))
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error))
+
+
+@app.put("/workspace/billing", response_model=BillingAccountResponse)
+async def update_billing_account(
+    req: BillingAccountUpdateRequest,
+    context: Optional[AuthContext] = Depends(get_auth_context),
+):
+    if context is None:
+        raise HTTPException(status_code=401, detail="Workspace authentication is required")
+    _require_role(context, OWNER_ROLES)
+    try:
+        account = await asyncio.to_thread(
+            _billing_service.update_account,
+            context.workspace_id,
+            plan=req.plan,
+            billing_status=req.billing_status,
+            trial_ends_at=req.trial_ends_at,
+            invoice_contact_email=req.invoice_contact_email,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    await _audit(
+        context,
+        "workspace.billing_updated",
+        "workspace",
+        context.workspace_id,
+        metadata={"plan": account["plan"], "billing_status": account["billing_status"], "trial_ends_at": account["trial_ends_at"].isoformat() if account["trial_ends_at"] else None},
+    )
+    return BillingAccountResponse(**account)
+
+
+@app.get("/workspace/activation", response_model=ActivationFunnelResponse)
+async def get_activation_funnel(context: Optional[AuthContext] = Depends(get_auth_context)):
+    if context is None:
+        raise HTTPException(status_code=401, detail="Workspace authentication is required")
+    _require_role(context, OWNER_ROLES)
+    return ActivationFunnelResponse(**(await asyncio.to_thread(_activation_service.funnel, context.workspace_id)))
+
+
 @app.post("/report-shares", response_model=ReportShareResponse, status_code=201)
 async def create_report_share(
     req: ReportShareCreateRequest,
@@ -758,6 +815,7 @@ async def create_report_share(
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
     await _audit(context, "report_share.created", "report_share", share.id, share.project_id, {"run_id": share.run_id, "expires_at": share.expires_at.isoformat()})
+    await asyncio.to_thread(_activation_service.record_first, context.workspace_id, "first_shared_report")
     return _share_to_response(share, f"{str(request.base_url).rstrip('/')}/shared-reports/{token}")
 
 
@@ -786,7 +844,11 @@ async def get_shared_report(token: str):
 async def seed_agency_demo(context: Optional[AuthContext] = Depends(get_auth_context)):
     """Create an idempotent mock-only demo workspace with sample datasets."""
     _require_role(context, WRITE_ROLES)
-    return DemoSeedResponse(**(await asyncio.to_thread(_demo_seed_service.seed, context.workspace_id if context else None)))
+    seeded = await asyncio.to_thread(_demo_seed_service.seed, context.workspace_id if context else None)
+    if context is not None:
+        for milestone in ("demo_seeded", "first_project", "first_dataset"):
+            await asyncio.to_thread(_activation_service.record_first, context.workspace_id, milestone)
+    return DemoSeedResponse(**seeded)
 
 
 # ── Existing Run Endpoints ───────────────────────────────────
@@ -1230,6 +1292,8 @@ async def create_project(req: ProjectCreateRequest, context: Optional[AuthContex
         context.workspace_id if context else None,
     )
     await _audit(context, "project.created", "project", project.id, project.id, {"name": project.name})
+    if context is not None:
+        await asyncio.to_thread(_activation_service.record_first, context.workspace_id, "first_project")
     return _project_to_response(project)
 
 
@@ -1309,6 +1373,8 @@ async def create_dataset(req: DatasetCreateRequest, context: Optional[AuthContex
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     await _audit(context, "dataset.created", "dataset", dataset.id, dataset.project_id, {"name": dataset.name})
+    if context is not None:
+        await asyncio.to_thread(_activation_service.record_first, context.workspace_id, "first_dataset")
     return _dataset_to_response(dataset)
 
 
@@ -1346,6 +1412,8 @@ async def upload_dataset(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     await _audit(context, "dataset.uploaded", "dataset", dataset.id, dataset.project_id, {"name": dataset.name})
+    if context is not None:
+        await asyncio.to_thread(_activation_service.record_first, context.workspace_id, "first_dataset")
     return _dataset_to_response(dataset)
 
 

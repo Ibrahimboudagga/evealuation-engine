@@ -207,6 +207,38 @@ class WorkspaceUsageResponse(BaseModel):
     snapshot_created_at: Optional[datetime] = None
 
 
+class BillingAccountUpdateRequest(BaseModel):
+    plan: Optional[str] = Field(default=None, min_length=1, max_length=50)
+    billing_status: Optional[Literal["trial", "active", "manual", "past_due", "cancelled"]] = None
+    trial_ends_at: Optional[datetime] = None
+    invoice_contact_email: Optional[str] = Field(default=None, max_length=255)
+
+
+class BillingAccountResponse(BaseModel):
+    workspace_id: str
+    plan: str
+    billing_status: Literal["trial", "active", "manual", "past_due", "cancelled"]
+    trial_ends_at: Optional[datetime] = None
+    invoice_contact_email: Optional[str] = None
+    warnings: List[str] = Field(default_factory=list)
+
+
+class ActivationMilestoneResponse(BaseModel):
+    name: str
+    completed: bool
+    occurred_at: Optional[datetime] = None
+    count: int
+
+
+class ActivationFunnelResponse(BaseModel):
+    workspace_id: str
+    completed_milestones: int
+    total_milestones: int
+    activation_rate: float
+    next_milestone: Optional[str] = None
+    milestones: List[ActivationMilestoneResponse]
+
+
 class ReportShareCreateRequest(BaseModel):
     run_id: Optional[str] = None
     project_id: Optional[str] = None

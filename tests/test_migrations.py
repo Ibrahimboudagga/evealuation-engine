@@ -121,6 +121,7 @@ def test_migration_creates_a_fresh_database(tmp_path):
     assert {"plan", "billing_status", "trial_ends_at", "invoice_contact_email", "limits_json"} <= {
         column["name"] for column in inspector.get_columns("workspaces")
     }
+    assert "occurrence_count" in {column["name"] for column in inspector.get_columns("activation_events")}
 
 
 def test_migration_preserves_copied_legacy_records_and_marks_them_unverified(tmp_path):

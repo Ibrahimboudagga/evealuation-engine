@@ -10,6 +10,7 @@ from typing import Optional
 
 from app.database.connection import get_db
 from app.database.models import MembershipDB, ProjectAccessDB, ProjectDB, UserDB, UserSessionDB, WorkspaceDB
+from app.services.activation_service import ActivationService
 
 
 ROLE_OWNER = "owner"
@@ -118,7 +119,9 @@ class IdentityService:
                 {"workspace_id": workspace.id}, synchronize_session=False
             )
             db.commit()
-            return AuthContext(user.id, user.email, workspace.id, ROLE_OWNER), token
+            context = AuthContext(user.id, user.email, workspace.id, ROLE_OWNER)
+        ActivationService().record_first(context.workspace_id, "workspace_created")
+        return context, token
 
     def authenticate(self, token: str, workspace_id: Optional[str] = None) -> AuthContext:
         with get_db() as db:
