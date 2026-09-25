@@ -31,6 +31,14 @@ async def test_mock_generation_text():
     assert "Who are you?" in response
     assert usage is None
 
+
+@pytest.mark.asyncio
+async def test_explicit_mock_timeout_supports_credential_free_retry_rehearsal():
+    provider = ProviderFactory.create(provider="mock", model_id="mock-timeout")
+    assert provider.is_mock is True
+    with pytest.raises(TimeoutError, match="pilot rehearsal"):
+        await provider.generate("hello")
+
 @pytest.mark.asyncio
 async def test_mock_generation_json():
     provider = ProviderFactory.create("openai-mock")

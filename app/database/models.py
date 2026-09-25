@@ -24,6 +24,7 @@ class WorkspaceDB(Base):
     trial_ends_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     invoice_contact_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     limits_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    notification_settings_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     memberships: Mapped[list["MembershipDB"]] = relationship(back_populates="workspace", cascade="all, delete-orphan")
     projects: Mapped[list["ProjectDB"]] = relationship(back_populates="workspace")

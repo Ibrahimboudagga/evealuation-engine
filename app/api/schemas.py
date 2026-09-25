@@ -239,6 +239,34 @@ class ActivationFunnelResponse(BaseModel):
     milestones: List[ActivationMilestoneResponse]
 
 
+class NotificationSettingsRequest(BaseModel):
+    """Workspace notification preferences; delivery credentials are never accepted here."""
+
+    enabled: bool = False
+    recipients: List[str] = Field(default_factory=list, max_length=20)
+    events: List[Literal["run_completed", "run_failed", "run_regressed", "report_expiring"]] = Field(
+        default_factory=lambda: ["run_completed", "run_failed", "run_regressed", "report_expiring"]
+    )
+
+
+class NotificationSettingsResponse(NotificationSettingsRequest):
+    delivery_status: Literal["configured", "not_configured"]
+
+
+class AdminConsoleResponse(BaseModel):
+    """Owner-only account overview used by the consolidated Gradio console."""
+
+    members: List[WorkspaceMemberResponse] = Field(default_factory=list)
+    projects: List[Dict[str, Any]] = Field(default_factory=list)
+    templates: List[Dict[str, Any]] = Field(default_factory=list)
+    provider_connections: List[ProviderConnectionResponse] = Field(default_factory=list)
+    usage: WorkspaceUsageResponse
+    billing: BillingAccountResponse
+    notifications: NotificationSettingsResponse
+    health: HealthResponse
+    audit_events: List[AuditEventResponse] = Field(default_factory=list)
+
+
 class ReportShareCreateRequest(BaseModel):
     run_id: Optional[str] = None
     project_id: Optional[str] = None
