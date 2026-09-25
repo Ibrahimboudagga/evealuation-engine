@@ -507,3 +507,25 @@ with client stakeholders.
 | HOSTED_PILOT_ONBOARDING.md | Hosted-pilot deployment and onboarding checklist. |
 | PILOT_REHEARSAL.md | Clean Docker/PostgreSQL pilot verification runbook. |
 
+## Agent and application scenario extension
+
+The standalone `run_scenarios.py` CLI now supports structured application and
+agent evaluation. Its implementation is in `app/scenarios/`: versioned scenario
+and evidence schemas, deterministic assertions, fixture/HTTP/legal-RAG adapters,
+bounded sequential execution, incremental JSONL persistence, and escaped HTML
+review reports. See [SCENARIO_EVALUATION.md](SCENARIO_EVALUATION.md) for the full
+contract and runnable examples.
+
+Supported checks include output JSON Pointers, required and forbidden tools,
+complete-trace call budgets, citation identifiers, latency/token budgets, and
+the Open SaaS planner's task/subtask/time constraints. A missing required trace
+or measurement produces an inconclusive evaluation with a null score; errors
+do not become low-quality answers. Explicit fixtures always remain simulated.
+
+This extension is not yet connected to database-backed workspace runs, Gradio,
+automatic retries, schedules, usage accounting, or shared report links. Its run
+manifest/results are local artifacts. Live Open SaaS execution needs an
+authenticated staging bridge around its existing Wasp action; the legal adapter
+uses the reference start/status/report endpoints but cannot invent absent tool
+traces. The examples demonstrate simulated executions, not verified live
+performance of either reference project.

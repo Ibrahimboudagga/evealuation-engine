@@ -767,3 +767,10 @@ numpy>=1.20.0
 sentence-transformers>=2.2.0
 json_repair>=0.60.0
 ```
+## Agent and application scenarios
+
+The scenario CLI evaluates structured application outputs, observed tool use,
+citation IDs, and execution budgets. It includes simulated legal RAG and Open
+SaaS planner examples, JSONL results, and local HTML review.
+See [Scenario evaluation](SCENARIO_EVALUATION.md) for commands, live integration
+contracts, evidence limitations, and current scope.

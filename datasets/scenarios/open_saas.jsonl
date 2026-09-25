@@ -1,0 +1,1 @@
+{"schema_version":1,"id":"saas-planner","task":"Create today's schedule for the seeded staging user's tasks.","inputs":{"hours":2},"schedule":{"task_names":["Prepare proposal"],"available_hours":2,"min_subtasks_per_task":3},"max_latency_ms":30000}
