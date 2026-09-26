@@ -62,6 +62,15 @@ def _verify_password(password: str, encoded: Optional[str]) -> bool:
 
 
 class IdentityService:
+    def accessible_project_ids(self, context: AuthContext) -> list[str]:
+        with get_db() as db:
+            query = db.query(ProjectDB.id).filter(ProjectDB.workspace_id == context.workspace_id)
+            if context.role == ROLE_CLIENT_VIEWER:
+                query = query.join(ProjectAccessDB, ProjectAccessDB.project_id == ProjectDB.id).join(
+                    MembershipDB, MembershipDB.id == ProjectAccessDB.membership_id).filter(
+                    MembershipDB.user_id == context.user_id, MembershipDB.workspace_id == context.workspace_id)
+            return [row[0] for row in query.all()]
+
     def members(self, workspace_id: str):
         with get_db() as db:
             members = db.query(MembershipDB).filter(MembershipDB.workspace_id == workspace_id).all()
@@ -114,6 +123,8 @@ class IdentityService:
                 created_at=now,
             )
             db.add_all([workspace, user, membership])
+            db.add(UserSessionDB(id=str(uuid.uuid4()), user_id=user.id, token_hash=_token_hash(token),
+                                 expires_at=now + timedelta(hours=12), created_at=now))
             # The first owner claims pre-workspace records during migration.
             db.query(ProjectDB).filter(ProjectDB.workspace_id.is_(None)).update(
                 {"workspace_id": workspace.id}, synchronize_session=False
@@ -123,7 +134,7 @@ class IdentityService:
         ActivationService().record_first(context.workspace_id, "workspace_created")
         return context, token
 
-    def authenticate(self, token: str, workspace_id: Optional[str] = None) -> AuthContext:
+    def authenticate(self, token: str, workspace_id: Optional[str] = None, allow_legacy: bool = False) -> AuthContext:
         with get_db() as db:
             session = db.query(UserSessionDB).filter(UserSessionDB.token_hash == _token_hash(token)).first()
             if session and (session.revoked_at is not None or session.expires_at <= _now()):
@@ -131,6 +142,8 @@ class IdentityService:
             user = session.user if session else db.query(UserDB).filter(UserDB.api_token_hash == _token_hash(token)).first()
             if not user:
                 raise ValueError("Invalid API token")
+            if not session and (not allow_legacy or user.password_hash):
+                raise ValueError("Legacy tokens can only set an initial password; sign in for normal access.")
             memberships = db.query(MembershipDB).filter(MembershipDB.user_id == user.id).all()
             if not memberships:
                 raise ValueError("User has no workspace membership")
@@ -169,7 +182,11 @@ class IdentityService:
             session = db.query(UserSessionDB).filter(UserSessionDB.token_hash == _token_hash(token)).first()
             if session:
                 session.revoked_at = _now()
-                db.commit()
+            else:
+                user = db.query(UserDB).filter(UserDB.api_token_hash == _token_hash(token)).first()
+                if user:
+                    user.api_token_hash = _token_hash(secrets.token_urlsafe(32))
+            db.commit()
 
     def change_password(self, user_id: str, current_password: Optional[str], new_password: str) -> None:
         with get_db() as db:
@@ -177,6 +194,9 @@ class IdentityService:
             if not user or (user.password_hash and not _verify_password(current_password or "", user.password_hash)):
                 raise ValueError("Current password is incorrect")
             user.password_hash = _password_hash(new_password)
+            user.api_token_hash = _token_hash(secrets.token_urlsafe(32))
+            db.query(UserSessionDB).filter(UserSessionDB.user_id == user.id).update(
+                {"revoked_at": _now()}, synchronize_session=False)
             db.commit()
 
     def has_users(self) -> bool:
@@ -191,6 +211,8 @@ class IdentityService:
         with get_db() as db:
             user = db.query(UserDB).filter(UserDB.email == email.lower().strip()).first()
             token = ""
+            if user and initial_password:
+                raise ValueError("Cannot assign a password to an existing identity; use its own password-change flow.")
             if not user:
                 token = secrets.token_urlsafe(32)
                 user = UserDB(
@@ -203,12 +225,12 @@ class IdentityService:
                 )
                 db.add(user)
                 db.flush()
+                db.add(UserSessionDB(id=str(uuid.uuid4()), user_id=user.id, token_hash=_token_hash(token),
+                                     expires_at=_now() + timedelta(hours=12), created_at=_now()))
             membership = db.query(MembershipDB).filter(
                 MembershipDB.workspace_id == context.workspace_id,
                 MembershipDB.user_id == user.id,
             ).first()
-            if initial_password:
-                user.password_hash = _password_hash(initial_password)
             if membership:
                 membership.role = role
             else:

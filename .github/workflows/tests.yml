@@ -1,0 +1,41 @@
+name: Tests and deployment smoke
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.11', '3.14']
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: evaluation_test
+          POSTGRES_USER: evaluation
+          POSTGRES_PASSWORD: 'ci%encoded/pass'
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U evaluation -d evaluation_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      GRADIO_ANALYTICS_ENABLED: 'False'
+      HF_HUB_OFFLINE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install -r requirements.txt
+      - run: python -m pytest -q
+      - name: PostgreSQL startup with an encoded password and long dataset path
+        run: python -m scripts.deployment_smoke
+        env:
+          DATABASE_URL: 'postgresql+psycopg://evaluation:ci%25encoded%2Fpass@localhost:5432/evaluation_test'
+      - name: Record resolved runtime dependencies
+        run: python -m pip freeze > resolved-dependencies.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dependencies-python-${{ matrix.python }}
+          path: resolved-dependencies.txt

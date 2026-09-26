@@ -4,16 +4,12 @@ import os
 import json
 import tempfile
 from pathlib import Path
+import inspect
+from app.ui.session import api_headers as _api_headers, bind_session
 
 API_BASE = os.getenv("API_BASE", "http://localhost:8000")
 
 PROVIDER_CHOICES = ["openai", "anthropic", "cohere", "gemini", "mock"]
-
-
-def _api_headers():
-    """Use the deployment's workspace token without placing it in Gradio state or outputs."""
-    token = os.getenv("WORKSPACE_API_TOKEN")
-    return {"Authorization": f"Bearer {token}"} if token else {}
 
 
 async def submit_run(
@@ -52,19 +48,19 @@ async def submit_run(
         return {"error": str(e)}
 
 
-async def setup_workspace(email, display_name, workspace_name, password):
+async def setup_workspace(email, display_name, workspace_name, password, setup_secret):
     if not email or not display_name or not workspace_name or not password:
         return {"error": "Enter an owner email, display name, workspace name, and password."}
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
-            response = await client.post(f"{API_BASE}/auth/bootstrap", json={
+            response = await client.post(f"{API_BASE}/auth/bootstrap", headers={"X-Setup-Token": setup_secret or ""}, json={
                 "email": email, "display_name": display_name, "workspace_name": workspace_name, "password": password,
             })
             response.raise_for_status()
         data = response.json()
         return {
-            "message": "Workspace created. Save api_token in WORKSPACE_API_TOKEN, restart Gradio, then use Seed Agency Demo.",
-            "workspace_id": data["workspace_id"], "api_token": data["api_token"],
+            "message": "Workspace created. Sign in with your email and password, then seed the demo.",
+            "workspace_id": data["workspace_id"],
         }
     except httpx.HTTPStatusError as error:
         return {"error": f"HTTP {error.response.status_code}: {error.response.text}"}
@@ -80,11 +76,12 @@ async def sign_in_user(email, password, workspace_id):
             })
             response.raise_for_status()
         data = response.json()
-        return {"message": "Signed in. Use this personal token as WORKSPACE_API_TOKEN for this local UI process.", **data}
+        return {"message": "Signed in for this browser session.", "workspace_id": data["workspace_id"]}, {
+            "access_token": data["access_token"], "workspace_id": data["workspace_id"]}
     except httpx.HTTPStatusError as error:
-        return {"error": f"HTTP {error.response.status_code}: {error.response.text}"}
+        return {"error": f"HTTP {error.response.status_code}: sign-in failed."}, None
     except Exception as error:
-        return {"error": str(error)}
+        return {"error": "Unable to sign in."}, None
 
 
 async def get_run_status(run_id):
@@ -121,6 +118,9 @@ async def get_run_status(run_id):
                     m["generation_errors"],
                     m["evaluation_errors"],
                     m["passing_evaluations"],
+                    m.get("unverified_cases", 0),
+                    ", ".join(m.get("backends", [])),
+                    "verified" if m.get("denominator_verified") else "historical / unverified",
                 ])
             return status, rows, configuration
     except httpx.HTTPStatusError as e:
@@ -820,28 +820,50 @@ async def get_pairwise_status(run_id):
         return f"Error: {e}", None, None, None
 
 
+async def sign_out_user(session):
+    if session:
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                response = await client.post(f"{API_BASE}/auth/sign-out", headers={
+                    "Authorization": "Bearer " + session["access_token"], "X-Workspace-ID": session["workspace_id"]})
+                response.raise_for_status()
+        except httpx.HTTPError:
+            return {"message": "Browser session cleared; server revocation could not be confirmed."}, None
+    return {"message": "Signed out."}, None
+
+
+_session_callbacks = {name for name, fn in list(globals().items()) if inspect.iscoroutinefunction(fn)
+                      and name not in {"sign_in_user", "setup_workspace", "sign_out_user"}}
+for _name in _session_callbacks:
+    globals()[_name] = bind_session(globals()[_name])
+
+
 with gr.Blocks(title="LLM Evaluation Engine") as demo:
+    user_session = gr.State(value=None, time_to_live=43200)
     gr.Markdown("# LLM Evaluation Engine")
 
     with gr.Tab("Setup Wizard"):
-        gr.Markdown("### Hosted-pilot checklist\n1. Set `WORKSPACE_ENCRYPTION_KEY` and a PostgreSQL `DATABASE_URL` for production.\n2. Create the first owner below and copy the token once.\n3. Set `WORKSPACE_API_TOKEN`, restart Gradio, then use **Seed Agency Demo**, run a mock evaluation, and create an expiring client link.")
+        gr.Markdown("### Hosted-pilot checklist\n1. Set `WORKSPACE_ENCRYPTION_KEY` and a PostgreSQL `DATABASE_URL` for production.\n2. Create the first owner below and copy the token once.\n3. Sign in in this browser, then use **Seed Agency Demo**, run a mock evaluation, and create an expiring client link.")
         with gr.Row():
             wizard_email = gr.Textbox(label="Owner Email")
             wizard_name = gr.Textbox(label="Owner Display Name")
             wizard_workspace = gr.Textbox(label="Agency Workspace Name")
         wizard_password = gr.Textbox(label="Owner Password (12+ characters)", type="password")
+        wizard_secret = gr.Textbox(label="Operator setup secret (required in production)", type="password")
         wizard_button = gr.Button("Create Agency Workspace", variant="primary")
         wizard_output = gr.JSON(label="One-time Setup Result")
-        wizard_button.click(fn=setup_workspace, inputs=[wizard_email, wizard_name, wizard_workspace, wizard_password], outputs=wizard_output)
+        wizard_button.click(fn=setup_workspace, inputs=[wizard_email, wizard_name, wizard_workspace, wizard_password, wizard_secret], outputs=wizard_output)
 
     with gr.Tab("Sign In"):
-        gr.Markdown("Sign in with your individual account. For this local Gradio deployment, copy the returned personal session token to `WORKSPACE_API_TOKEN` and restart the UI process.")
+        gr.Markdown("Sign in with your own account. Authorization stays in this browser session. To switch workspaces, sign in again with the workspace ID.")
         login_email = gr.Textbox(label="Email")
         login_password = gr.Textbox(label="Password", type="password")
         login_workspace = gr.Textbox(label="Workspace ID (only if you belong to more than one)")
         login_button = gr.Button("Sign In", variant="primary")
         login_output = gr.JSON(label="Personal Session")
-        login_button.click(fn=sign_in_user, inputs=[login_email, login_password, login_workspace], outputs=login_output)
+        login_button.click(fn=sign_in_user, inputs=[login_email, login_password, login_workspace], outputs=[login_output, user_session])
+        logout_button = gr.Button("Sign out")
+        logout_button.click(fn=sign_out_user, inputs=[user_session], outputs=[login_output, user_session])
 
     with gr.Tab("Agency Admin Console"):
         gr.Markdown("""# Agency Admin Console
@@ -888,31 +910,31 @@ This owner-only page brings account operations into one place. The overview incl
                 )
                 admin_notifications_save = gr.Button("Save Notification Preferences")
                 admin_notifications_output = gr.JSON(label="Notification Preferences")
-        admin_refresh.click(fn=get_admin_console, outputs=admin_overview)
-        admin_seed_demo.click(fn=seed_agency_demo, outputs=admin_seed_output).then(fn=get_admin_console, outputs=admin_overview)
+        admin_refresh.click(fn=get_admin_console, outputs=admin_overview, inputs=[user_session])
+        admin_seed_demo.click(fn=seed_agency_demo, outputs=admin_seed_output, inputs=[user_session]).then(fn=get_admin_console, outputs=admin_overview, inputs=[user_session])
         admin_member_add.click(
             fn=add_workspace_member,
-            inputs=[admin_member_email, admin_member_name, admin_member_role, admin_member_password],
+            inputs=[admin_member_email, admin_member_name, admin_member_role, admin_member_password, user_session],
             outputs=admin_member_output,
-        ).then(fn=get_admin_console, outputs=admin_overview)
+        ).then(fn=get_admin_console, outputs=admin_overview, inputs=[user_session])
         admin_project_create.click(
             fn=create_project,
-            inputs=[admin_project_name, admin_project_client, admin_project_description, admin_project_tags],
+            inputs=[admin_project_name, admin_project_client, admin_project_description, admin_project_tags, user_session],
             outputs=admin_project_output,
-        ).then(fn=get_admin_console, outputs=admin_overview)
-        admin_launch_refresh.click(fn=template_choice_update, outputs=admin_launch_template)
-        admin_launch_refresh.click(fn=dataset_choice_update, outputs=admin_launch_dataset)
-        admin_launch_dataset.change(fn=refresh_version_choices, inputs=admin_launch_dataset, outputs=admin_launch_version)
+        ).then(fn=get_admin_console, outputs=admin_overview, inputs=[user_session])
+        admin_launch_refresh.click(fn=template_choice_update, outputs=admin_launch_template, inputs=[user_session])
+        admin_launch_refresh.click(fn=dataset_choice_update, outputs=admin_launch_dataset, inputs=[user_session])
+        admin_launch_dataset.change(fn=refresh_version_choices, inputs=[admin_launch_dataset, user_session], outputs=admin_launch_version)
         admin_launch_button.click(
             fn=launch_template,
-            inputs=[admin_launch_template, admin_launch_dataset, admin_launch_version],
+            inputs=[admin_launch_template, admin_launch_dataset, admin_launch_version, user_session],
             outputs=admin_launch_output,
-        ).then(fn=get_admin_console, outputs=admin_overview)
+        ).then(fn=get_admin_console, outputs=admin_overview, inputs=[user_session])
         admin_notifications_save.click(
             fn=save_notification_settings,
-            inputs=[admin_notifications_enabled, admin_notification_recipients, admin_notification_events],
+            inputs=[admin_notifications_enabled, admin_notification_recipients, admin_notification_events, user_session],
             outputs=admin_notifications_output,
-        ).then(fn=get_admin_console, outputs=admin_overview)
+        ).then(fn=get_admin_console, outputs=admin_overview, inputs=[user_session])
 
     with gr.Tab("Provider Connections"):
         gr.Markdown("Workspace owners configure a provider once. The credential is encrypted by the API and is never returned to the browser, reports, or other members.")
@@ -929,7 +951,7 @@ This owner-only page brings account operations into one place. The overview incl
                 connection_output = gr.JSON(label="Connection Result")
         connection_save_button.click(
             fn=create_provider_connection,
-            inputs=[connection_name, connection_provider, connection_model, connection_api_key, connection_base_url, connection_unauthenticated],
+            inputs=[connection_name, connection_provider, connection_model, connection_api_key, connection_base_url, connection_unauthenticated, user_session],
             outputs=connection_output,
         )
 
@@ -955,16 +977,16 @@ This owner-only page brings account operations into one place. The overview incl
                 template_output = gr.JSON(label="Template Result")
         template_save_button.click(
             fn=create_evaluation_template,
-            inputs=[template_name, template_candidate_connection, template_judge_connection, template_prompt, template_concurrency, template_timeout, template_coverage, template_max_drop],
+            inputs=[template_name, template_candidate_connection, template_judge_connection, template_prompt, template_concurrency, template_timeout, template_coverage, template_max_drop, user_session],
             outputs=template_output,
-        ).then(fn=template_choice_update, outputs=launch_template_choice)
-        refresh_templates_button.click(fn=template_choice_update, outputs=launch_template_choice)
-        refresh_templates_button.click(fn=dataset_choice_update, outputs=launch_template_dataset)
-        refresh_templates_button.click(fn=run_provider_connection_choice_updates, outputs=[template_candidate_connection, template_judge_connection])
-        launch_template_dataset.change(fn=refresh_version_choices, inputs=launch_template_dataset, outputs=launch_template_version)
+        ).then(fn=template_choice_update, outputs=launch_template_choice, inputs=[user_session])
+        refresh_templates_button.click(fn=template_choice_update, outputs=launch_template_choice, inputs=[user_session])
+        refresh_templates_button.click(fn=dataset_choice_update, outputs=launch_template_dataset, inputs=[user_session])
+        refresh_templates_button.click(fn=run_provider_connection_choice_updates, outputs=[template_candidate_connection, template_judge_connection], inputs=[user_session])
+        launch_template_dataset.change(fn=refresh_version_choices, inputs=[launch_template_dataset, user_session], outputs=launch_template_version)
         template_launch_button.click(
             fn=launch_template,
-            inputs=[launch_template_choice, launch_template_dataset, launch_template_version],
+            inputs=[launch_template_choice, launch_template_dataset, launch_template_version, user_session],
             outputs=template_output,
         )
 
@@ -993,13 +1015,13 @@ This owner-only page brings account operations into one place. The overview incl
             schedule_create_button = gr.Button("Create Schedule", variant="primary")
             schedule_list_button = gr.Button("Refresh Schedules")
         schedule_output = gr.JSON(label="Schedule Details")
-        schedule_dataset.change(fn=refresh_version_choices, inputs=schedule_dataset, outputs=schedule_version)
+        schedule_dataset.change(fn=refresh_version_choices, inputs=[schedule_dataset, user_session], outputs=schedule_version)
         schedule_create_button.click(
             fn=create_schedule,
-            inputs=[schedule_template, schedule_dataset, schedule_version, schedule_frequency],
+            inputs=[schedule_template, schedule_dataset, schedule_version, schedule_frequency, user_session],
             outputs=schedule_output,
         )
-        schedule_list_button.click(fn=list_schedules, outputs=schedule_output)
+        schedule_list_button.click(fn=list_schedules, outputs=schedule_output, inputs=[user_session])
 
     with gr.Tab("Usage & Limits"):
         gr.Markdown("Review this month's aggregate usage and set pilot-plan limits. Limits are checked before runs, projects, dataset storage, and report links are created.")
@@ -1011,8 +1033,8 @@ This owner-only page brings account operations into one place. The overview incl
             lines=4,
         )
         usage_save = gr.Button("Save Limits")
-        usage_refresh.click(fn=get_workspace_usage, outputs=usage_output)
-        usage_save.click(fn=save_workspace_limits, inputs=usage_limits, outputs=usage_output)
+        usage_refresh.click(fn=get_workspace_usage, outputs=usage_output, inputs=[user_session])
+        usage_save.click(fn=save_workspace_limits, inputs=[usage_limits, user_session], outputs=usage_output)
 
     with gr.Tab("Account & Billing"):
         gr.Markdown("Manage a free trial or manual paid pilot. Payment-provider synchronization remains behind the billing service boundary.")
@@ -1030,10 +1052,10 @@ This owner-only page brings account operations into one place. The overview incl
             billing_refresh = gr.Button("Refresh Account")
             billing_save = gr.Button("Save Account", variant="primary")
         billing_output = gr.JSON(label="Billing Account and Trial Warnings")
-        billing_refresh.click(fn=get_billing_account, outputs=billing_output)
+        billing_refresh.click(fn=get_billing_account, outputs=billing_output, inputs=[user_session])
         billing_save.click(
             fn=save_billing_account,
-            inputs=[billing_plan, billing_status, billing_trial_end, billing_invoice_contact],
+            inputs=[billing_plan, billing_status, billing_trial_end, billing_invoice_contact, user_session],
             outputs=billing_output,
         )
 
@@ -1041,7 +1063,7 @@ This owner-only page brings account operations into one place. The overview incl
         gr.Markdown("Review privacy-safe onboarding milestones. This stores timestamps and aggregate counts only, never prompts, outputs, credentials, or report tokens.")
         activation_refresh = gr.Button("Refresh Activation Funnel", variant="primary")
         activation_output = gr.JSON(label="Workspace Activation")
-        activation_refresh.click(fn=get_activation_funnel, outputs=activation_output)
+        activation_refresh.click(fn=get_activation_funnel, outputs=activation_output, inputs=[user_session])
 
     with gr.Tab("Datasets"):
         gr.Markdown("Upload and version JSONL datasets. Assign each dataset to a client project; runs inherit that project.")
@@ -1068,37 +1090,37 @@ This owner-only page brings account operations into one place. The overview incl
 
         upload_button.click(
             fn=upload_dataset,
-            inputs=[upload_file, upload_name, upload_description, upload_tags, upload_project],
+            inputs=[upload_file, upload_name, upload_description, upload_tags, upload_project, user_session],
             outputs=upload_output,
         ).then(
             fn=dataset_choice_update,
             outputs=manage_dataset,
-        )
+        inputs=[user_session])
         refresh_datasets_button.click(
             fn=dataset_choice_update,
             outputs=manage_dataset,
-        )
-        manage_dataset.change(fn=refresh_version_choices, inputs=manage_dataset, outputs=manage_version)
-        refresh_versions_button.click(fn=refresh_version_choices, inputs=manage_dataset, outputs=manage_version)
+        inputs=[user_session])
+        manage_dataset.change(fn=refresh_version_choices, inputs=[manage_dataset, user_session], outputs=manage_version)
+        refresh_versions_button.click(fn=refresh_version_choices, inputs=[manage_dataset, user_session], outputs=manage_version)
         add_version_button.click(
             fn=add_dataset_version,
-            inputs=[manage_dataset, version_file],
+            inputs=[manage_dataset, version_file, user_session],
             outputs=version_output,
-        ).then(fn=refresh_version_choices, inputs=manage_dataset, outputs=manage_version)
+        ).then(fn=refresh_version_choices, inputs=[manage_dataset, user_session], outputs=manage_version)
         set_active_button.click(
             fn=set_active_dataset_version,
-            inputs=[manage_dataset, manage_version],
+            inputs=[manage_dataset, manage_version, user_session],
             outputs=version_output,
-        ).then(fn=refresh_version_choices, inputs=manage_dataset, outputs=manage_version)
+        ).then(fn=refresh_version_choices, inputs=[manage_dataset, user_session], outputs=manage_version)
 
     create_project_button.click(
         fn=create_project,
-        inputs=[project_name, project_client_name, project_description, project_tags],
+        inputs=[project_name, project_client_name, project_description, project_tags, user_session],
         outputs=project_output,
-    ).then(fn=project_choice_update, outputs=upload_project)
-    seed_demo_button.click(fn=seed_agency_demo, outputs=demo_seed_output).then(
+    ).then(fn=project_choice_update, outputs=upload_project, inputs=[user_session])
+    seed_demo_button.click(fn=seed_agency_demo, outputs=demo_seed_output, inputs=[user_session]).then(
         fn=project_choice_update, outputs=upload_project
-    ).then(fn=dataset_choice_update, outputs=manage_dataset)
+    , inputs=[user_session]).then(fn=dataset_choice_update, outputs=manage_dataset, inputs=[user_session])
 
     with gr.Tab("Run Evaluation"):
         gr.Markdown("Choose a stored dataset version and workspace provider connections. Credentials are configured once by an owner and never entered here.")
@@ -1133,12 +1155,12 @@ This owner-only page brings account operations into one place. The overview incl
                 evaluator_model,
                 concurrency,
                 judge_prompt_template,
-            ],
+            user_session],
             outputs=run_output,
         )
-        refresh_run_datasets.click(fn=dataset_choice_update, outputs=dataset_id)
-        refresh_run_datasets.click(fn=run_provider_connection_choice_updates, outputs=[candidate_connection, evaluator_connection])
-        dataset_id.change(fn=refresh_version_choices, inputs=dataset_id, outputs=dataset_version_id)
+        refresh_run_datasets.click(fn=dataset_choice_update, outputs=dataset_id, inputs=[user_session])
+        refresh_run_datasets.click(fn=run_provider_connection_choice_updates, outputs=[candidate_connection, evaluator_connection], inputs=[user_session])
+        dataset_id.change(fn=refresh_version_choices, inputs=[dataset_id, user_session], outputs=dataset_version_id)
 
     with gr.Tab("View Results"):
         gr.Markdown("Look up an evaluation run by its ID.")
@@ -1149,6 +1171,7 @@ This owner-only page brings account operations into one place. The overview incl
             headers=[
                 "Evaluator", "Mean Score", "Pass Rate", "Valid / Total", "Coverage",
                 "Generation Errors", "Evaluation Errors", "Passing Valid",
+                "Unverified Cases", "Measurement Backend", "Expected Case Count",
             ],
             label="Metrics",
         )
@@ -1156,7 +1179,7 @@ This owner-only page brings account operations into one place. The overview incl
 
         fetch_btn.click(
             fn=get_run_status,
-            inputs=[run_id_input],
+            inputs=[run_id_input, user_session],
             outputs=[status_output, metrics_output, configuration_output],
         )
 
@@ -1185,7 +1208,7 @@ This owner-only page brings account operations into one place. The overview incl
 
         review_button.click(
             fn=review_run_results,
-            inputs=[review_run_id, review_evaluator, review_outcomes, review_score_min, review_score_max],
+            inputs=[review_run_id, review_evaluator, review_outcomes, review_score_min, review_score_max, user_session],
             outputs=[
                 review_summary,
                 review_table,
@@ -1207,7 +1230,7 @@ This owner-only page brings account operations into one place. The overview incl
         report_download = gr.File(label="Client-ready Report")
         report_button.click(
             fn=export_run_report,
-            inputs=[report_run_id, report_format],
+            inputs=[report_run_id, report_format, user_session],
             outputs=[report_export_status, report_download],
         )
         gr.Markdown("### Read-only client link")
@@ -1218,7 +1241,7 @@ This owner-only page brings account operations into one place. The overview incl
             share_title = gr.Textbox(label="Report Title", value="Client Evaluation Report")
         share_button = gr.Button("Create Expiring Client Link")
         share_output = gr.JSON(label="Share Link — copy it now; it is shown only at creation")
-        share_button.click(fn=create_report_share, inputs=[share_run_id, share_hours, share_agency_name, share_title], outputs=share_output)
+        share_button.click(fn=create_report_share, inputs=[share_run_id, share_hours, share_agency_name, share_title, user_session], outputs=share_output)
 
     with gr.Tab("Project Dashboard"):
         gr.Markdown("Review the latest release state, coverage and quality trends, and recent evaluation failures for one client project.")
@@ -1226,8 +1249,8 @@ This owner-only page brings account operations into one place. The overview incl
         dashboard_refresh = gr.Button("Refresh Projects")
         dashboard_load = gr.Button("Load Selected Dashboard", variant="primary")
         dashboard_output = gr.JSON(label="Project Health")
-        dashboard_refresh.click(fn=project_choice_update, outputs=dashboard_project)
-        dashboard_load.click(fn=get_project_dashboard, inputs=dashboard_project, outputs=dashboard_output)
+        dashboard_refresh.click(fn=project_choice_update, outputs=dashboard_project, inputs=[user_session])
+        dashboard_load.click(fn=get_project_dashboard, inputs=[dashboard_project, user_session], outputs=dashboard_output)
 
     with gr.Tab("Release Checks"):
         gr.Markdown("Mark a completed run as the baseline, then compare a later completed run against the configured release rules.")
@@ -1248,13 +1271,13 @@ This owner-only page brings account operations into one place. The overview incl
 
         baseline_mark_button.click(
             fn=mark_run_as_baseline,
-            inputs=baseline_mark_run_id,
+            inputs=[baseline_mark_run_id, user_session],
             outputs=baseline_mark_output,
-        ).then(fn=baseline_choice_update, outputs=release_baseline_id)
-        refresh_baselines_button.click(fn=baseline_choice_update, outputs=release_baseline_id)
+        ).then(fn=baseline_choice_update, outputs=release_baseline_id, inputs=[user_session])
+        refresh_baselines_button.click(fn=baseline_choice_update, outputs=release_baseline_id, inputs=[user_session])
         release_check_button.click(
             fn=compare_run_with_baseline,
-            inputs=[release_run_id, release_baseline_id, release_coverage_minimum, release_pass_rate_drop],
+            inputs=[release_run_id, release_baseline_id, release_coverage_minimum, release_pass_rate_drop, user_session],
             outputs=[release_check_summary, release_check_detail],
         )
 
@@ -1294,31 +1317,31 @@ This owner-only page brings account operations into one place. The overview incl
                 pw_judge_connection,
                 pw_judge_model,
                 pw_concurrency,
-            ],
+            user_session],
             outputs=pw_run_output,
         )
-        pw_refresh_datasets.click(fn=dataset_choice_update, outputs=pw_dataset_id)
+        pw_refresh_datasets.click(fn=dataset_choice_update, outputs=pw_dataset_id, inputs=[user_session])
         pw_refresh_datasets.click(
             fn=pairwise_provider_connection_choice_updates,
             outputs=[pw_model_a_connection, pw_model_b_connection, pw_judge_connection],
-        )
-        pw_dataset_id.change(fn=refresh_version_choices, inputs=pw_dataset_id, outputs=pw_dataset_version_id)
+        inputs=[user_session])
+        pw_dataset_id.change(fn=refresh_version_choices, inputs=[pw_dataset_id, user_session], outputs=pw_dataset_version_id)
 
     demo.load(
         fn=all_dataset_choice_updates,
         outputs=[manage_dataset, dataset_id, pw_dataset_id],
-    )
+    inputs=[user_session])
     demo.load(
         fn=all_provider_connection_choice_updates,
         outputs=[candidate_connection, evaluator_connection, pw_model_a_connection, pw_model_b_connection, pw_judge_connection],
-    )
-    demo.load(fn=project_choice_update, outputs=upload_project)
-    demo.load(fn=template_choice_update, outputs=launch_template_choice)
-    demo.load(fn=template_choice_update, outputs=schedule_template)
-    demo.load(fn=project_choice_update, outputs=dashboard_project)
-    demo.load(fn=dataset_choice_update, outputs=launch_template_dataset)
-    demo.load(fn=dataset_choice_update, outputs=schedule_dataset)
-    demo.load(fn=run_provider_connection_choice_updates, outputs=[template_candidate_connection, template_judge_connection])
+    inputs=[user_session])
+    demo.load(fn=project_choice_update, outputs=upload_project, inputs=[user_session])
+    demo.load(fn=template_choice_update, outputs=launch_template_choice, inputs=[user_session])
+    demo.load(fn=template_choice_update, outputs=schedule_template, inputs=[user_session])
+    demo.load(fn=project_choice_update, outputs=dashboard_project, inputs=[user_session])
+    demo.load(fn=dataset_choice_update, outputs=launch_template_dataset, inputs=[user_session])
+    demo.load(fn=dataset_choice_update, outputs=schedule_dataset, inputs=[user_session])
+    demo.load(fn=run_provider_connection_choice_updates, outputs=[template_candidate_connection, template_judge_connection], inputs=[user_session])
 
     with gr.Tab("Pairwise Results"):
         gr.Markdown("Look up a pairwise evaluation run by its ID.")
@@ -1337,10 +1360,10 @@ This owner-only page brings account operations into one place. The overview incl
 
         pw_fetch_btn.click(
             fn=get_pairwise_status,
-            inputs=[pw_run_id_input],
+            inputs=[pw_run_id_input, user_session],
             outputs=[pw_status_output, pw_metrics_output, pw_comparisons_output, pw_configuration_output],
         )
 
 
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", server_port=7860)
+    demo.launch(server_name=os.getenv("GRADIO_SERVER_NAME", "127.0.0.1"), server_port=7860)

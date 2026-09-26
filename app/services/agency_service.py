@@ -135,7 +135,7 @@ class AgencyService:
             ).order_by(EvaluationRunDB.created_at.desc()).first()
         if not baseline:
             return {"status": "inconclusive", "reasons": ["No baseline has been marked for this project."]}
-        return self.baselines.compare(run_id, baseline.id, 0.95, 0.05)
+        return self.baselines.compare(run_id, baseline.id)
 
     def project_dashboard(self, workspace_id: str, project_id: str) -> dict[str, Any]:
         with get_db() as db:

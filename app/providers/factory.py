@@ -21,6 +21,7 @@ class ProviderFactory:
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         allow_unauthenticated: bool = False,
+        use_default_api_key: bool = True,
     ) -> BaseProvider:
         """
         Creates and returns a provider instance.
@@ -75,6 +76,11 @@ class ProviderFactory:
                 base_url=demo_base_url,
                 demo_mode=True,
             )
+
+        if allow_unauthenticated and provider_clean not in {"compatible", "openai-compatible"}:
+            raise ProviderConfigurationError("Unauthenticated access is only supported for an explicit compatible provider.")
+        if not use_default_api_key and not api_key and not allow_unauthenticated:
+            raise ProviderConfigurationError("This provider connection requires an API key; process credentials are disabled.")
 
         if provider_clean == "openai":
             return OpenAIProvider(model_name=model_id, api_key=api_key, base_url=base_url)

@@ -1,4 +1,6 @@
 import uuid
+import hashlib
+import json
 import asyncio
 import math
 import random
@@ -26,6 +28,7 @@ from app.services.run_configuration import (
     dataset_version_snapshot,
 )
 from app.services.activation_service import ActivationService
+from app.services.result_integrity import expected_cases, authoritative_records
 
 log = structlog.get_logger()
 
@@ -120,6 +123,8 @@ class PairwiseEvaluationRunner:
                 raise RunCancellationRequested("Execution cancelled by user request.")
 
     def _persist_comparison_batch(self, run_id: str, comparisons: List[PairwiseComparisonDB]) -> None:
+        for comparison in comparisons:
+            comparison.identity_key = hashlib.sha256(json.dumps([run_id, comparison.example_id]).encode()).hexdigest()
         """Commit a small completed batch so a restart retains prior work."""
         if not comparisons:
             return
@@ -141,6 +146,8 @@ class PairwiseEvaluationRunner:
         with get_db() as db:
             existing_run = db.query(PairwiseRunDB).filter(PairwiseRunDB.id == run_id).first()
             if existing_run:
+                if existing_run.status not in {RunStatus.QUEUED.value, RunStatus.RUNNING.value}:
+                    raise ValueError("A terminal run is immutable; create a retry run instead.")
                 return run_id
 
             if dataset_id is not None:
@@ -185,10 +192,10 @@ class PairwiseEvaluationRunner:
                 if dataset_path is None:
                     raise ValueError("Either dataset_path or dataset_id must be provided.")
                 resolved_path = str(Path(dataset_path).resolve())
-                db_dataset = db.query(DatasetDB).filter(DatasetDB.id == resolved_path).first()
+                db_dataset = None
                 if not db_dataset:
                     db_dataset = DatasetDB(
-                        id=resolved_path,
+                        id=str(uuid.uuid4()),
                         name=Path(dataset_path).name,
                         latest_version_number=0,
                     )
@@ -280,7 +287,7 @@ class PairwiseEvaluationRunner:
                     outcome=EvaluationOutcome.GENERATION_ERROR.value,
                     error_message=error_message,
                 )
-                db_comp.metadata_dict = {"latency_sec": latency_sec}
+                db_comp.metadata_dict = {"latency_sec": latency_sec, "candidate_a_usage": usage_a, "candidate_b_usage": usage_b}
                 return db_comp
 
             # Randomize presentation order before judging.
@@ -348,6 +355,8 @@ class PairwiseEvaluationRunner:
                 error_message = sanitize_error(result.error_message) if result.error_message else None
 
             meta["latency_sec"] = latency_sec
+            meta["candidate_a_usage"] = usage_a
+            meta["candidate_b_usage"] = usage_b
             meta["original_order"] = original_order
 
             db_comp = PairwiseComparisonDB(
@@ -423,6 +432,10 @@ class PairwiseEvaluationRunner:
         if dataset_id is not None:
             # New mode: load from DB
             with get_db() as db:
+                pinned_run = db.get(PairwiseRunDB, run_id)
+                if pinned_run.dataset_id != dataset_id or (dataset_version_id and pinned_run.dataset_version_id != dataset_version_id):
+                    raise ValueError("Dataset does not match the submitted run.")
+                dataset_version_id = pinned_run.dataset_version_id
                 db_dataset = db.query(DatasetDB).filter(DatasetDB.id == dataset_id).first()
                 if not db_dataset:
                     raise ValueError(f"Dataset '{dataset_id}' not found.")
@@ -474,10 +487,11 @@ class PairwiseEvaluationRunner:
             resolved_path = str(Path(dataset_path).resolve()) if dataset_path else "unknown"
 
             with get_db() as db:
-                db_dataset = db.query(DatasetDB).filter(DatasetDB.id == resolved_path).first()
+                db_run = db.query(PairwiseRunDB).filter(PairwiseRunDB.id == run_id).one()
+                db_dataset = db.get(DatasetDB, db_run.dataset_id)
                 if not db_dataset:
                     db_dataset = DatasetDB(
-                        id=resolved_path,
+                        id=str(uuid.uuid4()),
                         name=dataset_name,
                         latest_version_number=0,
                     )
@@ -490,6 +504,22 @@ class PairwiseEvaluationRunner:
                 db_run.started_at = datetime.now(timezone.utc)
                 db.commit()
 
+        if not examples or len({e.id for e in examples}) != len(examples):
+            raise ValueError("Dataset must be nonempty and example IDs must be unique.")
+        with get_db() as db:
+            run = db.get(PairwiseRunDB, run_id)
+            if db.query(PairwiseComparisonDB.id).filter_by(run_id=run_id).first():
+                raise ValueError("Run already has results; create a retry run to preserve result identity.")
+            config = run.run_configuration or {}
+            dataset_config = config.setdefault("dataset", {})
+            if dataset_path and dataset_config.get("content_sha256") and hashlib.sha256(Path(dataset_path).read_bytes()).hexdigest() != dataset_config["content_sha256"]:
+                raise ValueError("Dataset content changed after submission.")
+            ids = sorted(e.id for e in examples)
+            if dataset_config.get("expected_case_ids") is not None and dataset_config["expected_case_ids"] != ids:
+                raise ValueError("Execution cases do not match the submitted dataset snapshot.")
+            dataset_config.update(expected_case_ids=ids, example_count=len(ids))
+            run.run_configuration = config
+            db.commit()
         try:
             for start in range(0, len(examples), self.result_batch_size):
                 self._raise_if_cancelled(run_id)
@@ -528,12 +558,16 @@ def get_pairwise_run_metrics(run_id: str) -> Dict[str, Any]:
     with get_db() as db:
         comparisons = db.query(PairwiseComparisonDB).filter(
             PairwiseComparisonDB.run_id == run_id
-        ).all()
+        ).order_by(PairwiseComparisonDB.example_id, PairwiseComparisonDB.id).all()
+        run = db.get(PairwiseRunDB, run_id)
+        expected, verified = expected_cases(db, run, comparisons)
 
-    if not comparisons:
+    if not comparisons and not expected:
         return {}
 
-    total_comparisons = len(comparisons)
+    total_comparisons = len(expected)
+    progress = len({c.example_id for c in comparisons} & expected) / total_comparisons if total_comparisons else 0.0
+    comparisons, duplicates, unexpected = authoritative_records(comparisons, expected)
     evaluated_comparisons = [
         comparison
         for comparison in comparisons
@@ -590,6 +624,10 @@ def get_pairwise_run_metrics(run_id: str) -> Dict[str, Any]:
         "model_a_name": model_a_name,
         "model_b_name": model_b_name,
         "total_comparisons": total_comparisons,
+        "denominator_verified": verified,
+        "execution_progress": progress,
+        "unverified_cases": duplicates,
+        "unexpected_cases": unexpected,
         "valid_comparisons": valid_comparisons,
         "generation_errors": generation_errors,
         "evaluation_errors": evaluation_errors,

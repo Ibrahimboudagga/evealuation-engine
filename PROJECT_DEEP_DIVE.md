@@ -529,3 +529,7 @@ authenticated staging bridge around its existing Wasp action; the legal adapter
 uses the reference start/status/report endpoints but cannot invent absent tool
 traces. The examples demonstrate simulated executions, not verified live
 performance of either reference project.
+
+## September 2026 stabilization update
+
+[REVIEW_REMEDIATION.md](REVIEW_REMEDIATION.md) records the architecture-review corrections and supersedes earlier claims about process-wide UI tokens, same-ID manual retries, baseline compatibility, and deployment readiness. It also distinguishes implemented fixes from the remaining quota ledger, deployment verification, measurement calibration, and scenario integration work.
