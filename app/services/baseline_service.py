@@ -6,6 +6,7 @@ from app.database.connection import get_db
 from app.database.models import EvaluationRunDB
 from app.runners.eval_runner import get_run_metrics
 from app.schemas.outcomes import RunStatus
+from app.services.run_configuration import compatibility_fingerprint
 
 
 def _delta(current: Optional[float | int], baseline: Optional[float | int]) -> Optional[float | int]:
@@ -33,8 +34,8 @@ class BaselineService:
         self,
         run_id: str,
         baseline_run_id: str,
-        coverage_minimum: float = 0.95,
-        exact_match_pass_rate_max_drop: float = 0.05,
+        coverage_minimum: Optional[float] = None,
+        exact_match_pass_rate_max_drop: Optional[float] = None,
     ) -> dict[str, Any]:
         if run_id == baseline_run_id:
             raise ValueError("A run cannot be compared with itself.")
@@ -52,7 +53,18 @@ class BaselineService:
                 raise ValueError("Runs from different agency projects cannot be compared")
             current_status = current.status
             baseline_status = baseline.status
+            saved_rules = ((current.run_configuration or {}).get("request") or {}).get("release_rules") or {}
+            current_fingerprint = compatibility_fingerprint(current.run_configuration) if current.configuration_verified else None
+            baseline_fingerprint = compatibility_fingerprint(baseline.run_configuration) if baseline.configuration_verified else None
+            compatible = (current_fingerprint is not None and current_fingerprint == baseline_fingerprint
+                          and current.is_simulated == baseline.is_simulated)
 
+        coverage_minimum = coverage_minimum if coverage_minimum is not None else saved_rules.get("coverage_minimum")
+        coverage_minimum = .95 if coverage_minimum is None else coverage_minimum
+        exact_match_pass_rate_max_drop = exact_match_pass_rate_max_drop if exact_match_pass_rate_max_drop is not None else saved_rules.get("exact_match_pass_rate_max_drop")
+        exact_match_pass_rate_max_drop = .05 if exact_match_pass_rate_max_drop is None else exact_match_pass_rate_max_drop
+        if not 0 <= coverage_minimum <= 1 or not 0 <= exact_match_pass_rate_max_drop <= 1:
+            raise ValueError("Release rule thresholds must be between zero and one.")
         rules = {
             "coverage_minimum": coverage_minimum,
             "exact_match_pass_rate_max_drop": exact_match_pass_rate_max_drop,
@@ -67,6 +79,10 @@ class BaselineService:
                 "comparisons": [],
             }
 
+        if not compatible:
+            return {"run_id": run_id, "baseline_run_id": baseline_run_id, "status": "inconclusive",
+                    "rules": rules, "reasons": ["Incompatible or unverified experiment contracts: dataset, cases, evaluators, judge, or simulation differ."],
+                    "comparisons": []}
         current_metrics = get_run_metrics(run_id).get("evaluators", {})
         baseline_metrics = get_run_metrics(baseline_run_id).get("evaluators", {})
         evaluator_names = sorted(set(current_metrics) | set(baseline_metrics))
@@ -118,10 +134,15 @@ class BaselineService:
                     ),
                 }
             )
-            if current_metric and current_metric["evaluation_coverage"] < coverage_minimum:
-                reasons.append(
-                    f"{evaluator} coverage is {current_metric['evaluation_coverage']:.1%}, below the required {coverage_minimum:.1%}."
-                )
+            for label, metric in (("current", current_metric), ("baseline", baseline_metric)):
+                if metric and (metric["evaluation_coverage"] < coverage_minimum or metric["avg_score"] is None
+                               or metric.get("unverified_cases", 0) or metric.get("unexpected_cases", 0)):
+                    inconclusive = True
+                    reasons.append(f"{label} {evaluator} has insufficient or ambiguous evaluation coverage (minimum {coverage_minimum:.1%}).")
+            if current_metric and baseline_metric and (current_metric.get("backends") != baseline_metric.get("backends")
+                    or len(current_metric.get("backends", [])) > 1 or len(baseline_metric.get("backends", [])) > 1):
+                inconclusive = True
+                reasons.append(f"{evaluator} used incompatible measurement backends.")
 
         baseline_exact = baseline_metrics.get("exact_match")
         current_exact = current_metrics.get("exact_match")

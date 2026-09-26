@@ -75,7 +75,8 @@ class ScheduleService:
                 dataset_id=dataset_id,
                 dataset_version_id=dataset_version_id,
                 frequency=frequency,
-                next_execution_at=(next_execution_at or now).replace(tzinfo=None),
+                next_execution_at=(next_execution_at.astimezone(timezone.utc).replace(tzinfo=None)
+                                   if next_execution_at and next_execution_at.tzinfo else next_execution_at or now),
                 active=True,
                 created_at=now,
                 updated_at=now,
@@ -109,6 +110,7 @@ class ScheduleService:
             schedule.updated_at = _now()
             db.commit()
             db.refresh(schedule)
+            _ = list(schedule.executions)
             return schedule
 
     def overdue_count(self) -> int:
@@ -121,6 +123,7 @@ class ScheduleService:
     def _provider(self, workspace_id: str, connection_id: str, model_override: Optional[str]):
         connection = self._connections.resolve(workspace_id, connection_id)
         return ProviderFactory.create(
+            use_default_api_key=False,
             provider=connection.provider,
             model_id=model_override or connection.default_model,
             api_key=connection.api_key,
@@ -206,6 +209,7 @@ class ScheduleService:
                 EvaluationTemplateDB.workspace_id == schedule.workspace_id,
             ).first()
             scheduled_for = schedule.next_execution_at
+            occurrence_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"evaluation-schedule:{schedule.id}:{scheduled_for.isoformat()}"))
             schedule_data = {
                 "id": schedule.id,
                 "workspace_id": schedule.workspace_id,
@@ -234,6 +238,7 @@ class ScheduleService:
                 SimpleNamespace(settings=template_settings),
             )
             run_id = runner.create_run(
+                run_id=occurrence_id,
                 dataset_id=schedule_data["dataset_id"],
                 dataset_version_id=schedule_data["dataset_version_id"],
             )
@@ -249,7 +254,7 @@ class ScheduleService:
             schedule.last_error = error_message
             schedule.updated_at = now
             execution = ScheduleExecutionDB(
-                id=str(uuid.uuid4()),
+                id=occurrence_id,
                 schedule_id=schedule.id,
                 run_id=run_id,
                 scheduled_for=scheduled_for,
