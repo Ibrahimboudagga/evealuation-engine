@@ -17,6 +17,8 @@ def _add_run(run_id: str, *, status: str = RunStatus.COMPLETED.value, exact_scor
                 model_name="candidate",
                 status=status,
                 project_id=None,
+                configuration_verified=True,
+                run_configuration_json='{"run_type":"single_model","dataset":{"content_sha256":"fixture-content","expected_case_ids":["case-1"]},"evaluators":[{"name":"exact_match","version":"1"},{"name":"llm_judge","version":"1"}],"is_simulated":false}',
             )
         )
         if status == RunStatus.COMPLETED.value:

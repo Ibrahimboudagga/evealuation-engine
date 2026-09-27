@@ -108,7 +108,7 @@ Before serving multiple agency users, generate and set `WORKSPACE_ENCRYPTION_KEY
 curl -X POST http://localhost:8000/auth/bootstrap -H "Content-Type: application/json" -d "{\"email\":\"owner@example.com\",\"display_name\":\"Owner\",\"workspace_name\":\"Acme Agency\"}"
 ```
 
-Store the returned `api_token` in a secret manager. API requests then use `Authorization: Bearer <token>`; set `WORKSPACE_API_TOKEN` for the local Gradio process and restart it. Owners can add `owner`, `editor`, `viewer`, or `client_viewer` memberships through `POST /workspace/members`. Projects, their datasets, runs, results, exports, and release checks are workspace-scoped.
+The returned `api_token` is an expiring setup session. API requests use `Authorization: Bearer <token>`; sign in individually in Gradio. Browser sessions no longer use `WORKSPACE_API_TOKEN`. Owners can add `owner`, `editor`, `viewer`, or `client_viewer` memberships through `POST /workspace/members`. Projects, their datasets, runs, results, exports, and release checks are workspace-scoped.
 
 Owners save a provider once using `POST /provider-connections` or the **Provider Connections** Gradio tab. The API encrypts an API key with Fernet, never returns it, and stores only a connection ID in the run configuration and reports. Workspace runs select connection IDs instead of submitting raw keys. `credential_reference` is supported as a stored reference; resolving one requires an external secret resolver in the deployment.
 
@@ -129,7 +129,7 @@ copy .env.production.example .env
 docker compose up --build
 ```
 
-Complete the **Setup Wizard** at `http://localhost:7860`, save the one-time owner token as `WORKSPACE_API_TOKEN`, then recreate the UI container. Follow [HOSTED_PILOT_ONBOARDING.md](HOSTED_PILOT_ONBOARDING.md) for the mock-demo, report-sharing, backup, and restoration checklist.
+Set `BOOTSTRAP_SECRET`, complete the **Setup Wizard** at `http://localhost:7860` using that secret, then sign in with your own account. Compose ports are localhost-only by default. Follow [HOSTED_PILOT_ONBOARDING.md](HOSTED_PILOT_ONBOARDING.md) for the mock-demo, report-sharing, backup, and restoration checklist.
 
 `GET /health` verifies safe production configuration and database reachability. Workspace owners can review `GET /audit-events`, set retention with `PUT /operations/retention`, and explicitly run retention cleanup through `POST /operations/retention/apply`. Audit events capture the actor and safe metadata for project, dataset, run, baseline, template, export, report-share, and retention changes. Retention cleanup removes expired share links and audit records older than the configured window; it does not delete evaluation data.
 
@@ -158,7 +158,7 @@ Interactive docs at `http://localhost:8000/docs`.
 Start the API server first, then:
 
 ```bash
-python app/ui/gradio_app.py
+python -m app.ui.gradio_app
 ```
 
 ---
@@ -774,3 +774,7 @@ citation IDs, and execution budgets. It includes simulated legal RAG and Open
 SaaS planner examples, JSONL results, and local HTML review.
 See [Scenario evaluation](SCENARIO_EVALUATION.md) for commands, live integration
 contracts, evidence limitations, and current scope.
+
+## Stabilization after architecture review
+
+See [Review remediation](REVIEW_REMEDIATION.md) for corrected security/retry/coverage behavior, changed API contracts, validation evidence, and remaining production-readiness work.

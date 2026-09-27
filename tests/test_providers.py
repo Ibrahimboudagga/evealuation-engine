@@ -153,4 +153,4 @@ def test_api_rejects_missing_credential_before_creating_a_run(monkeypatch, tmp_p
         )
 
     assert response.status_code == 400
-    assert "requires an API key" in response.json()["detail"]
+    assert "workspace provider connection" in response.json()["detail"]

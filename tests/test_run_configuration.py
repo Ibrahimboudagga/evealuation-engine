@@ -91,10 +91,8 @@ def test_run_status_api_exposes_configuration_without_credentials(configuration_
                 "dataset_path": configuration_dataset,
                 "candidate_provider": "openai",
                 "candidate_model": "mock",
-                "candidate_api_key": "sk-should-not-appear",
                 "evaluator_provider": "openai",
                 "evaluator_model": "mock",
-                "evaluator_api_key": "sk-judge-should-not-appear",
             },
         )
         assert response.status_code == 200

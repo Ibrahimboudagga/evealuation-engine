@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import json
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -17,6 +18,7 @@ from app.database.models import (
     PairwiseRunDB,
     ProjectDB,
     WorkerStateDB,
+    RunAttemptDB,
 )
 from app.errors import RunCancellationRequested, sanitize_error
 from app.evaluators.pairwise_judge import PairwiseJudgeEvaluator
@@ -82,12 +84,17 @@ class QueueWorker:
         poll_interval_seconds: float = 0.25,
         retry_base_seconds: float = 1.0,
         retry_cap_seconds: float = 60.0,
+        heartbeat_interval_seconds: float = 5.0,
     ) -> None:
         self.worker_id = worker_id or f"worker-{uuid.uuid4().hex[:12]}"
         self.poll_interval_seconds = poll_interval_seconds
         self.retry_base_seconds = retry_base_seconds
         self.retry_cap_seconds = retry_cap_seconds
+        self.heartbeat_interval_seconds = heartbeat_interval_seconds
         self._task: Optional[asyncio.Task] = None
+        self._heartbeat_task: Optional[asyncio.Task] = None
+        self._active_claim = None
+        self._loop_error = None
         self._operations = OperationsService()
         self._connections = ProviderConnectionService()
         self._schedules = ScheduleService()
@@ -97,8 +104,13 @@ class QueueWorker:
             return
         await asyncio.to_thread(self._heartbeat)
         self._task = asyncio.create_task(self._loop(), name=f"evaluation-queue-{self.worker_id}")
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
 
     async def stop(self) -> None:
+        if self._heartbeat_task:
+            self._heartbeat_task.cancel()
+            await asyncio.gather(self._heartbeat_task, return_exceptions=True)
+            self._heartbeat_task = None
         if self._task:
             self._task.cancel()
             try:
@@ -109,9 +121,22 @@ class QueueWorker:
 
     async def _loop(self) -> None:
         while True:
-            processed = await self.run_once()
+            try:
+                processed = await self.run_once()
+                self._loop_error = None
+            except Exception as error:
+                self._loop_error = sanitize_error(error)
+                processed = False
             if not processed:
                 await asyncio.sleep(self.poll_interval_seconds)
+
+    async def _heartbeat_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self.heartbeat_interval_seconds)
+            try:
+                await asyncio.to_thread(self._heartbeat, self._active_claim)
+            except Exception as error:
+                self._loop_error = sanitize_error(error)
 
     def _heartbeat(self, claimed: Optional[ClaimedRun] = None) -> None:
         now = utcnow()
@@ -148,6 +173,8 @@ class QueueWorker:
         worker_status = "unstarted" if not state else "working" if state.claimed_run_id else "healthy"
         if heartbeat_age_seconds is not None and heartbeat_age_seconds > 120:
             worker_status = "stale"
+        if self._loop_error or (self._task is not None and self._task.done()):
+            worker_status = "failed"
         return {
             "worker_id": self.worker_id,
             "status": worker_status,
@@ -263,10 +290,13 @@ class QueueWorker:
             base_url = connection.base_url
             allow_unauthenticated = connection.allow_unauthenticated
             api_key = connection.api_key
+        elif workspace_id and provider not in {"mock", "demo", "dummy"} and model != "mock":
+            raise ValueError("Workspace runs require a provider connection for live execution.")
 
         if not provider or not model:
             raise ValueError("Run configuration is missing provider or model settings.")
         return ProviderFactory.create(
+            use_default_api_key=False,
             provider=provider,
             model_id=model,
             api_key=api_key,
@@ -374,6 +404,14 @@ class QueueWorker:
                 return
 
             delay = self._retry_delay(record.attempt_count)
+            # Retain a complete attempt archive before restarting the suite.
+            result_model = EvaluationResultDB if claimed.kind == "evaluation_run" else PairwiseComparisonDB
+            results = db.query(result_model).filter(result_model.run_id == claimed.run_id).all()
+            db.add(RunAttemptDB(id=str(uuid.uuid4()), run_id=record.id, run_type=claimed.kind,
+                               attempt_count=record.attempt_count, error_message=error_message,
+                               results_json=json.dumps([{c.name: getattr(r, c.name) for c in result_model.__table__.columns}
+                                                        for r in results], default=str)))
+            db.query(result_model).filter(result_model.run_id == claimed.run_id).delete(synchronize_session=False)
             record.status = RunStatus.QUEUED.value
             record.next_attempt_at = utcnow() + timedelta(seconds=delay)
             record.last_transient_error = error_message
@@ -446,7 +484,6 @@ class QueueWorker:
         if self._cancellation_requested(claimed):
             self._mark_cancelled(claimed)
         elif self._all_results_are_transient(claimed):
-            self._discard_attempt_results(claimed)
             self._retry_or_fail(claimed, "Provider request timed out or was temporarily unavailable.")
         else:
             self._clear_completed_claim(claimed)
@@ -474,19 +511,33 @@ class QueueWorker:
         claimed = await asyncio.to_thread(self.claim_next)
         if not claimed:
             return bool(schedule_result["triggered"] or schedule_result["failed"])
+        self._active_claim = claimed
         try:
             await self._execute_claim(claimed)
         finally:
+            self._active_claim = None
             self._heartbeat()
         return True
 
-    def retry_now(self, kind: RunKind, run_id: str) -> bool:
+    def retry_now(self, kind: RunKind, run_id: str) -> str | None:
         model = EvaluationRunDB if kind == "evaluation_run" else PairwiseRunDB
         with get_db() as db:
             record = db.query(model).filter(model.id == run_id).first()
             if not record or record.status not in {RunStatus.QUEUED.value, RunStatus.FAILED.value, RunStatus.INTERRUPTED.value}:
-                return False
+                return None
             previous_status = record.status
+            if previous_status != RunStatus.QUEUED.value:
+                values = {key: getattr(record, key) for key in (
+                    "dataset_id", "dataset_version_id", "project_id", "is_simulated",
+                    "run_configuration_json", "configuration_verified", "max_attempts")}
+                for key in (("model_name",) if kind == "evaluation_run" else ("model_a_name", "model_b_name")):
+                    values[key] = getattr(record, key)
+                record = model(id=str(uuid.uuid4()), parent_run_id=run_id, **values)
+                # Attempts belong to the parent; retain the immutable experiment only.
+                config = record.run_configuration or {}
+                config.pop("attempt_history", None)
+                record.run_configuration = config
+                db.add(record)
             record.status = RunStatus.QUEUED.value
             record.next_attempt_at = utcnow()
             record.cancellation_requested_at = None
@@ -499,9 +550,10 @@ class QueueWorker:
             project = db.query(ProjectDB).filter(ProjectDB.id == record.project_id).first() if record.project_id else None
             workspace_id = project.workspace_id if project else None
             project_id = record.project_id
+            retry_id = record.id
             db.commit()
 
-        claimed = ClaimedRun(kind, run_id, project_id, workspace_id, {})
-        self._record(claimed, "run.retry_requested", {"worker_id": self.worker_id})
-        return True
+        claimed = ClaimedRun(kind, retry_id, project_id, workspace_id, {})
+        self._record(claimed, "run.retry_requested", {"worker_id": self.worker_id, "parent_run_id": run_id})
+        return retry_id
 

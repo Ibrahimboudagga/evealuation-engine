@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     # Database
     database_url: str = "sqlite:///evals.db"
     app_environment: str = "development"
+    bootstrap_secret: Optional[str] = None
     backup_guidance_url: str = "https://www.postgresql.org/docs/current/backup.html"
 
     # LLM provider API keys
@@ -75,6 +76,14 @@ def deployment_health() -> dict[str, Any]:
     issues: list[str] = []
     if not settings.workspace_encryption_key:
         issues.append("WORKSPACE_ENCRYPTION_KEY is not configured; encrypted provider connections cannot be saved.")
+    else:
+        from cryptography.fernet import Fernet
+        try:
+            Fernet(settings.workspace_encryption_key.encode())
+        except (ValueError, TypeError):
+            issues.append("WORKSPACE_ENCRYPTION_KEY is not a valid Fernet key.")
+    if settings.app_environment.lower() == "production" and not settings.bootstrap_secret:
+        issues.append("BOOTSTRAP_SECRET is required for production setup.")
     if settings.app_environment.lower() == "production" and settings.database_url.startswith("sqlite"):
         issues.append("Production deployments require a managed PostgreSQL DATABASE_URL; SQLite is only for local development.")
     return {

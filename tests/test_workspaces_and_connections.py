@@ -1,9 +1,9 @@
 from fastapi.testclient import TestClient
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from app.api.main import app
 from app.database.connection import get_db
-from app.database.models import MembershipDB, ProviderConnectionDB, UserDB, WorkspaceDB
+from app.database.models import MembershipDB, ProviderConnectionDB, UserDB, WorkspaceDB, UserSessionDB
 from app.services.identity_service import _token_hash
 
 
@@ -48,6 +48,8 @@ def test_workspace_scopes_projects_datasets_and_runs_and_enforces_roles():
                 role="viewer", created_at=now,
             )
             db.add_all([other_workspace, other_user, membership])
+            db.add(UserSessionDB(id="other-session", user_id=other_user.id, token_hash=_token_hash("other-token"),
+                                 expires_at=now + timedelta(hours=12)))
             db.commit()
 
         other_headers = {"Authorization": "Bearer other-token"}

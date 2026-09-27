@@ -375,10 +375,22 @@ class DatasetVersionDB(Base):
             return []
 
 
+class RunAttemptDB(Base):
+    __tablename__ = "run_attempt_archives"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    run_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    results_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
 class EvaluationRunDB(Base):
     __tablename__ = "evaluation_runs"
 
     id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    parent_run_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     dataset_id: Mapped[str] = mapped_column(String(255), ForeignKey("datasets.id"), nullable=False)
     dataset_version_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("dataset_versions.id"), nullable=True)
     project_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("projects.id"), nullable=True)
@@ -420,6 +432,7 @@ class EvaluationRunDB(Base):
 
 class EvaluationResultDB(Base):
     __tablename__ = "evaluation_results"
+    identity_key: Mapped[Optional[str]] = mapped_column(String(64), unique=True, nullable=True)
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     run_id: Mapped[str] = mapped_column(String(255), ForeignKey("evaluation_runs.id"), nullable=False)
@@ -455,6 +468,7 @@ class PairwiseRunDB(Base):
     __tablename__ = "pairwise_runs"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    parent_run_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     dataset_id: Mapped[str] = mapped_column(String(36), ForeignKey("datasets.id"), nullable=False)
     dataset_version_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("dataset_versions.id"), nullable=True)
     project_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("projects.id"), nullable=True)
@@ -496,6 +510,7 @@ class PairwiseRunDB(Base):
 
 class PairwiseComparisonDB(Base):
     __tablename__ = "pairwise_comparisons"
+    identity_key: Mapped[Optional[str]] = mapped_column(String(64), unique=True, nullable=True)
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     run_id: Mapped[str] = mapped_column(String(36), ForeignKey("pairwise_runs.id"), nullable=False)

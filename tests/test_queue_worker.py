@@ -141,9 +141,11 @@ def test_manual_retry_resets_an_exhausted_run(tmp_path):
         run.attempt_count = run.max_attempts
         db.commit()
 
-    assert QueueWorker().retry_now("evaluation_run", run_id)
+    retry_id = QueueWorker().retry_now("evaluation_run", run_id)
+    assert retry_id != run_id
     with get_db() as db:
-        run = db.query(EvaluationRunDB).filter_by(id=run_id).one()
+        assert db.get(EvaluationRunDB, run_id).status == RunStatus.FAILED.value
+        run = db.query(EvaluationRunDB).filter_by(id=retry_id).one()
         assert run.status == RunStatus.QUEUED.value
         assert run.attempt_count == 0
         assert run.next_attempt_at is not None

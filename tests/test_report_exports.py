@@ -82,6 +82,7 @@ def test_json_export_contains_configuration_metrics_and_failures():
     assert report["run"]["configuration"]["candidate"]["api_key"] == "[REDACTED]"
     assert report["metrics_by_evaluator"]["llm_judge"]["evaluation_coverage"] == 1 / 3
     assert report["failure_counts"] == {
+        "quality_failures": 0,
         "total_result_records": 3,
         "total_examples": 3,
         "generation_errors": 1,

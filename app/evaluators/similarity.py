@@ -1,4 +1,7 @@
 import structlog
+import asyncio
+import threading
+from app.errors import sanitize_error
 from collections import Counter
 import math
 from app.evaluators.base import BaseEvaluator
@@ -9,6 +12,7 @@ log = structlog.get_logger()
 
 # Cache for sentence-transformers model to avoid reloading
 _ST_MODEL = None
+_MODEL_LOCK = threading.Lock()
 
 class SemanticSimilarityEvaluator(BaseEvaluator):
     """
@@ -46,7 +50,10 @@ class SemanticSimilarityEvaluator(BaseEvaluator):
             
         return dot_product / (mag1 * mag2)
 
-    async def evaluate(
+    async def evaluate(self, input_text: str, expected_output: str, prediction: str) -> EvaluationResult:
+        return await asyncio.to_thread(self._evaluate_sync, input_text, expected_output, prediction)
+
+    def _evaluate_sync(
         self, 
         input_text: str, 
         expected_output: str, 
@@ -60,17 +67,20 @@ class SemanticSimilarityEvaluator(BaseEvaluator):
         
         try:
             # Attempt to use sentence-transformers
-            if _ST_MODEL is None:
-                # Lazy import
-                from sentence_transformers import SentenceTransformer
-                log.info("loading_sentence_transformer_model", model=self.model_name)
-                _ST_MODEL = SentenceTransformer(self.model_name)
+            with _MODEL_LOCK:
+                if _ST_MODEL is None:
+                    _ST_MODEL = {}
+                if self.model_name not in _ST_MODEL:
+                    from sentence_transformers import SentenceTransformer
+                    log.info("loading_sentence_transformer_model", model=self.model_name)
+                    _ST_MODEL[self.model_name] = SentenceTransformer(self.model_name)
+                model = _ST_MODEL[self.model_name]
             
             # Since model.encode is a synchronous, CPU-bound operation, we can run it or import util
             from sentence_transformers import util
             
-            embeddings1 = _ST_MODEL.encode(expected_output, convert_to_tensor=True)
-            embeddings2 = _ST_MODEL.encode(prediction, convert_to_tensor=True)
+            embeddings1 = model.encode(expected_output, convert_to_tensor=True)
+            embeddings2 = model.encode(prediction, convert_to_tensor=True)
             
             cosine_score = util.cos_sim(embeddings1, embeddings2)
             score = float(cosine_score.item())
@@ -86,10 +96,10 @@ class SemanticSimilarityEvaluator(BaseEvaluator):
             reason = "token-overlap cosine similarity (sentence-transformers not installed)"
         except Exception as e:
             # Other errors (e.g. downloading model failed)
-            log.warning("sentence_transformer_evaluation_failed_falling_back", error=str(e))
+            log.warning("sentence_transformer_evaluation_failed_falling_back", error=sanitize_error(e))
             score = self._token_cosine_similarity(expected_output, prediction)
             is_fallback = True
-            reason = f"token-overlap cosine similarity (error loading model: {str(e)})"
+            reason = "token-overlap cosine similarity (embedding backend unavailable)"
             
         return EvaluationResult(
             example_id="",  # Populated by the runner
@@ -101,6 +111,7 @@ class SemanticSimilarityEvaluator(BaseEvaluator):
             metadata={
                 "method": reason,
                 "is_fallback": is_fallback,
+                "backend": "token_overlap" if is_fallback else "sentence_transformers:" + self.model_name,
                 "model_name": self.model_name if not is_fallback else None
             }
         )

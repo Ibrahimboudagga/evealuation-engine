@@ -24,10 +24,13 @@ class DatasetService:
         search: Optional[str] = None,
         project_id: Optional[str] = None,
         workspace_id: Optional[str] = None,
+        allowed_project_ids: Optional[List[str]] = None,
     ) -> List[DatasetDB]:
         """List all datasets with optional tag filter and name search."""
         with get_db() as db:
             query = db.query(DatasetDB).options(selectinload(DatasetDB.versions), selectinload(DatasetDB.project))
+            if allowed_project_ids is not None:
+                query = query.filter(DatasetDB.project_id.in_(allowed_project_ids))
             if tag:
                 query = query.filter(DatasetDB.tags_json.contains(f'"{tag}"'))
             if search:
@@ -325,4 +328,6 @@ class DatasetService:
                 examples.append(EvaluationExample(**data))
             except Exception as e:
                 raise ValueError(f"Error parsing line {line_num}: {e}")
+        if len({example.id for example in examples}) != len(examples):
+            raise ValueError("Dataset example IDs must be unique.")
         return examples

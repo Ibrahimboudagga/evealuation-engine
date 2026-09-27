@@ -140,7 +140,7 @@ You MUST reply ONLY with a JSON object in this format (no markdown formatting, n
             )
 
         except Exception as e:
-            log.error("pairwise_judge_evaluation_failed", raw_response=raw_response, error=str(e))
+            log.error("pairwise_judge_evaluation_failed", error_type=type(e).__name__)
             error_message = sanitize_error(e)
             return PairwiseComparisonResult(
                 winner=None,

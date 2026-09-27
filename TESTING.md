@@ -42,3 +42,14 @@ Recorded on 2026-09-14 with Windows and Python 3.14.6:
 `tests.fakes.DeterministicFakeProvider` is available for tests that need a
 successful completion, valid single or pairwise judge JSON, malformed JSON, or
 a provider exception. It records prompts and never makes a network request.
+
+## Architecture-review stabilization (26 September 2026)
+
+The full local suite passed **205 tests** with five framework deprecation
+warnings. A fresh SQLite deployment smoke passed, and upgrading a copy of the
+legacy database preserved its 1 dataset, 4 runs, and 30 results.
+
+`.github/workflows/tests.yml` adds Python 3.11/3.14 and a PostgreSQL deployment
+smoke with an encoded password. These remote checks have not yet run for the
+stabilization branch. Docker's daemon was unavailable locally. See
+[REVIEW_REMEDIATION.md](REVIEW_REMEDIATION.md) for scope and remaining checks.

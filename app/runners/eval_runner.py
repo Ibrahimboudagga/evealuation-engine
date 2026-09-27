@@ -1,4 +1,6 @@
 import uuid
+import hashlib
+import json
 import asyncio
 import time
 import structlog
@@ -21,6 +23,7 @@ from app.services.run_configuration import (
     dataset_version_snapshot,
 )
 from app.services.activation_service import ActivationService
+from app.services.result_integrity import expected_cases, authoritative_records
 
 log = structlog.get_logger()
 
@@ -57,6 +60,8 @@ def load_dataset(dataset_path: str) -> List[EvaluationExample]:
                 examples.append(EvaluationExample(**data))
             except Exception as e:
                 raise ValueError(f"Error parsing line {line_num} in {dataset_path}: {e}")
+    if not examples or len({e.id for e in examples}) != len(examples):
+        raise ValueError("Dataset must be nonempty and example IDs must be unique.")
     return examples
 
 class EvaluationRunner:
@@ -121,6 +126,8 @@ class EvaluationRunner:
                 raise RunCancellationRequested("Execution cancelled by user request.")
 
     def _persist_result_batch(self, run_id: str, results: List[EvaluationResultDB]) -> None:
+        for result in results:
+            result.identity_key = hashlib.sha256(json.dumps([run_id, result.example_id, result.evaluator_name]).encode()).hexdigest()
         """Commit a small completed batch so a restart retains prior work."""
         if not results:
             return
@@ -142,6 +149,8 @@ class EvaluationRunner:
         with get_db() as db:
             existing_run = db.query(EvaluationRunDB).filter(EvaluationRunDB.id == run_id).first()
             if existing_run:
+                if existing_run.status not in {RunStatus.QUEUED.value, RunStatus.RUNNING.value}:
+                    raise ValueError("A terminal run is immutable; create a retry run instead.")
                 return run_id
 
             if dataset_id is not None:
@@ -184,10 +193,10 @@ class EvaluationRunner:
                 if dataset_path is None:
                     raise ValueError("Either dataset_path or dataset_id must be provided.")
                 resolved_path = str(Path(dataset_path).resolve())
-                db_dataset = db.query(DatasetDB).filter(DatasetDB.id == resolved_path).first()
+                db_dataset = None
                 if not db_dataset:
                     db_dataset = DatasetDB(
-                        id=resolved_path,
+                        id=str(uuid.uuid4()),
                         name=Path(dataset_path).name,
                         latest_version_number=0,
                     )
@@ -287,7 +296,7 @@ class EvaluationRunner:
             db_results = []
             for evaluator, res in zip(evaluators, eval_results):
                 if isinstance(res, Exception):
-                    log.error("evaluator_failed", evaluator=evaluator.name, example_id=example.id, error=str(res))
+                    log.error("evaluator_failed", evaluator=evaluator.name, example_id=example.id, error=sanitize_error(res))
                     error_message = (
                         f"Evaluation timed out after {self.execution_timeout_seconds:g} seconds."
                         if isinstance(res, asyncio.TimeoutError)
@@ -304,7 +313,8 @@ class EvaluationRunner:
                         outcome=EvaluationOutcome.EVALUATION_ERROR.value,
                         error_message=error_message,
                     )
-                    db_res.metadata_dict = {"error": error_message, "latency_sec": latency_sec}
+                    db_res.metadata_dict = {"error": error_message, "latency_sec": latency_sec,
+                                            "candidate_usage": provider_usage, "candidate_latency_sec": latency_sec}
                     db_results.append(db_res)
                     continue
                 
@@ -312,6 +322,8 @@ class EvaluationRunner:
                 res.example_id = example.id
                 meta = res.metadata or {}
                 meta["latency_sec"] = latency_sec
+                meta["candidate_latency_sec"] = latency_sec
+                meta["candidate_usage"] = provider_usage
                 res.metadata = meta
                 
                 # Build DB model
@@ -394,6 +406,10 @@ class EvaluationRunner:
         if dataset_id is not None:
             # New mode: load from DB
             with get_db() as db:
+                pinned_run = db.get(EvaluationRunDB, run_id)
+                if pinned_run.dataset_id != dataset_id or (dataset_version_id and pinned_run.dataset_version_id != dataset_version_id):
+                    raise ValueError("Dataset does not match the submitted run.")
+                dataset_version_id = pinned_run.dataset_version_id
                 db_dataset = db.query(DatasetDB).filter(DatasetDB.id == dataset_id).first()
                 if not db_dataset:
                     raise ValueError(f"Dataset '{dataset_id}' not found.")
@@ -446,11 +462,11 @@ class EvaluationRunner:
             resolved_path = str(Path(dataset_path).resolve()) if dataset_path else "unknown"
 
             with get_db() as db:
-                # Upsert dataset using resolved path as legacy identifier
-                db_dataset = db.query(DatasetDB).filter(DatasetDB.id == resolved_path).first()
+                db_run = db.query(EvaluationRunDB).filter(EvaluationRunDB.id == run_id).one()
+                db_dataset = db.get(DatasetDB, db_run.dataset_id)
                 if not db_dataset:
                     db_dataset = DatasetDB(
-                        id=resolved_path,
+                        id=str(uuid.uuid4()),
                         name=dataset_name,
                         latest_version_number=0,
                     )
@@ -463,6 +479,22 @@ class EvaluationRunner:
                 db_run.started_at = datetime.now(timezone.utc)
                 db.commit()
             
+        if not examples or len({e.id for e in examples}) != len(examples):
+            raise ValueError("Dataset must be nonempty and example IDs must be unique.")
+        with get_db() as db:
+            run = db.get(EvaluationRunDB, run_id)
+            if db.query(EvaluationResultDB.id).filter_by(run_id=run_id).first():
+                raise ValueError("Run already has results; create a retry run to preserve result identity.")
+            config = run.run_configuration or {}
+            dataset_config = config.setdefault("dataset", {})
+            if dataset_path and dataset_config.get("content_sha256") and hashlib.sha256(Path(dataset_path).read_bytes()).hexdigest() != dataset_config["content_sha256"]:
+                raise ValueError("Dataset content changed after submission.")
+            ids = sorted(e.id for e in examples)
+            if dataset_config.get("expected_case_ids") is not None and dataset_config["expected_case_ids"] != ids:
+                raise ValueError("Execution cases do not match the submitted dataset snapshot.")
+            dataset_config.update(expected_case_ids=ids, example_count=len(ids))
+            run.run_configuration = config
+            db.commit()
         try:
             for start in range(0, len(examples), self.result_batch_size):
                 self._raise_if_cancelled(run_id)
@@ -498,22 +530,28 @@ def get_run_metrics(run_id: str) -> Dict[str, Any]:
     """
     with get_db() as db:
         results = db.query(EvaluationResultDB).filter(EvaluationResultDB.run_id == run_id).all()
+        run = db.get(EvaluationRunDB, run_id)
+        expected, verified = expected_cases(db, run, results)
+        configured_names = [e["name"] for e in (run.run_configuration or {}).get("evaluators", [])] if run else []
         
-    if not results:
+    if not results and not expected:
         return {}
         
-    total_cases = len({result.example_id for result in results})
+    total_cases = len(expected)
     metrics = {
         "run_id": run_id,
         "total_examples": total_cases,
-        "evaluators": {}
+        "evaluators": {},
+        "denominator_verified": verified,
+        "execution_progress": len({r.example_id for r in results} & expected) / total_cases if total_cases else 0.0,
     }
 
-    results_by_evaluator: Dict[str, List[EvaluationResultDB]] = {}
+    results_by_evaluator: Dict[str, List[EvaluationResultDB]] = {name: [] for name in configured_names}
     for result in results:
         results_by_evaluator.setdefault(result.evaluator_name, []).append(result)
 
     for eval_name, evaluator_results in results_by_evaluator.items():
+        evaluator_results, duplicates, unexpected = authoritative_records(evaluator_results, expected)
         valid_scores = [
             result.score
             for result in evaluator_results
@@ -531,6 +569,10 @@ def get_run_metrics(run_id: str) -> Dict[str, Any]:
         pass_count = sum(1 for score in valid_scores if score >= 0.5)
         metrics["evaluators"][eval_name] = {
             "total_cases": total_cases,
+            "unverified_cases": duplicates,
+            "unexpected_cases": unexpected,
+            "denominator_verified": verified,
+            "backends": sorted({str(r.metadata_dict.get("backend", "token_overlap" if r.metadata_dict.get("is_fallback") else "default")) for r in evaluator_results}),
             "valid_evaluations": valid_count,
             "generation_errors": generation_errors,
             "evaluation_errors": evaluation_errors,

@@ -4,3 +4,7 @@ __pycache__
 .pytest_cache
 *.db
 .env
+.env.*
+.pytest_tmp
+scenario-output
+*.sqlite*

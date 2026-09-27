@@ -19,25 +19,26 @@ services:
       APP_ENVIRONMENT: production
       DATABASE_URL: postgresql+psycopg://evaluation:${POSTGRES_PASSWORD}@db:5432/evaluation
       WORKSPACE_ENCRYPTION_KEY: ${WORKSPACE_ENCRYPTION_KEY:?Set WORKSPACE_ENCRYPTION_KEY in .env}
+      BOOTSTRAP_SECRET: ${BOOTSTRAP_SECRET:?Set BOOTSTRAP_SECRET in .env}
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     depends_on:
       db:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready')"]
       interval: 20s
       timeout: 5s
       retries: 5
 
   ui:
     build: .
-    command: ["python", "app/ui/gradio_app.py"]
+    command: ["python", "-m", "app.ui.gradio_app"]
     environment:
-      WORKSPACE_API_TOKEN: ${WORKSPACE_API_TOKEN:-}
+      GRADIO_SERVER_NAME: 0.0.0.0
       API_BASE: http://api:8000
     ports:
-      - "7860:7860"
+      - "127.0.0.1:7860:7860"
     depends_on:
       api:
         condition: service_healthy

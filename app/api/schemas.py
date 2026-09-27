@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, model_validator
@@ -341,6 +343,9 @@ class HealthResponse(BaseModel):
 class EvaluatorMetric(BaseModel):
     """Aggregated metric for a single evaluator within a run."""
     evaluator: str = Field(..., description="Name of the evaluator")
+    unverified_cases: int = 0
+    denominator_verified: bool = False
+    backends: List[str] = Field(default_factory=list)
     total_cases: int = Field(..., description="All expected cases for this evaluator")
     valid_evaluations: int = Field(..., description="Cases with a completed numeric evaluation")
     generation_errors: int = Field(..., description="Cases where candidate generation failed")
@@ -355,6 +360,7 @@ class EvaluatorMetric(BaseModel):
 class RunStatusResponse(BaseModel):
     """Full status and metrics for a completed (or running) run."""
     run_id: str
+    parent_run_id: Optional[str] = None
     status: RunStatus
     metrics: Optional[List[EvaluatorMetric]] = None
     error: Optional[str] = None
@@ -650,6 +656,7 @@ class PairwiseComparisonItem(BaseModel):
 class PairwiseRunStatusResponse(BaseModel):
     """Full status and metrics for a pairwise run."""
     run_id: str
+    parent_run_id: Optional[str] = None
     model_a_name: str
     model_b_name: str
     status: RunStatus

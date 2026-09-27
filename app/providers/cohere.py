@@ -1,4 +1,5 @@
 import structlog
+from app.errors import sanitize_error
 import json
 from typing import Optional, Dict, Any, Tuple
 from app.providers.base import BaseProvider, ProviderConfigurationError
@@ -31,6 +32,8 @@ class CohereProvider(BaseProvider):
 
     async def generate(self, prompt: str) -> Tuple[str, Optional[Dict[str, Any]]]:
         if self.is_mock:
+            if all(key in prompt.lower() for key in ("winner", "score_a", "score_b")):
+                return json.dumps({"winner": "tie", "score_a": 8, "score_b": 8, "reason": "[SIMULATED] Equal demo scores."}), None
             if "json" in prompt.lower() or "score" in prompt.lower() or "reason" in prompt.lower():
                 return json.dumps({
                     "score": 8,
@@ -49,5 +52,5 @@ class CohereProvider(BaseProvider):
                 }
             return text, usage
         except Exception as e:
-            log.error("cohere_generate_failed", error=str(e))
+            log.error("cohere_generate_failed", error=sanitize_error(e))
             raise

@@ -1,6 +1,7 @@
 """Encrypted workspace-scoped provider connection management."""
 
 import uuid
+from urllib.parse import urlsplit
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -27,6 +28,12 @@ class ProviderConnectionService:
         api_key: Optional[str] = None, credential_reference: Optional[str] = None,
         base_url: Optional[str] = None, allow_unauthenticated: bool = False,
     ) -> ProviderConnectionDB:
+        if base_url:
+            parsed = urlsplit(base_url)
+            if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+                raise ValueError("Provider endpoint must be HTTP(S) without URL credentials, query, or fragment.")
+            if (api_key or credential_reference) and parsed.scheme != "https" and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
+                raise ValueError("Remote authenticated provider connections require HTTPS.")
         if api_key and credential_reference:
             raise ValueError("Provide either api_key or credential_reference, not both.")
         if not api_key and not credential_reference and not allow_unauthenticated:
@@ -68,6 +75,9 @@ class ProviderConnectionService:
                 connection.api_key = api_key  # transient attribute, never serialized or stored
             else:
                 connection.api_key = None
+            demo = connection.provider.lower() in {"mock", "demo", "dummy"} or connection.default_model == "mock"
+            if not demo and not connection.api_key and not (connection.allow_unauthenticated and connection.base_url):
+                raise ValueError("Provider connection requires credentials or explicit unauthenticated endpoint configuration.")
             return connection
 
     def delete(self, workspace_id: str, connection_id: str) -> bool:

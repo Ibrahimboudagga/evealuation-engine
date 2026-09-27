@@ -102,7 +102,7 @@ from app.services.usage_service import UsageService, WorkspaceLimitExceeded
 from app.services.billing_service import BillingService
 from app.services.activation_service import ActivationService
 from app.services.notification_service import NotificationService
-from app.config import deployment_health, require_production_configuration
+from app.config import deployment_health, require_production_configuration, get_settings
 from app.schemas.outcomes import EvaluationOutcome, RunStatus
 
 log = structlog.get_logger()
@@ -128,20 +128,21 @@ _notification_service = NotificationService()
 
 
 async def get_auth_context(
+    request: Request,
     authorization: Optional[str] = Header(default=None),
     x_workspace_id: Optional[str] = Header(default=None),
 ) -> Optional[AuthContext]:
     """Allow unauthenticated setup only before the first owner is bootstrapped."""
     has_users = await asyncio.to_thread(_identity_service.has_users)
     if not authorization:
-        if not has_users:
+        if not has_users and get_settings().app_environment.lower() != "production":
             return None
         raise HTTPException(status_code=401, detail="Authorization: Bearer <workspace API token> is required")
     scheme, _, token = authorization.partition(" ")
     if scheme.lower() != "bearer" or not token:
         raise HTTPException(status_code=401, detail="Use Authorization: Bearer <workspace API token>")
     try:
-        return await asyncio.to_thread(_identity_service.authenticate, token, x_workspace_id)
+        return await asyncio.to_thread(_identity_service.authenticate, token, x_workspace_id, request.url.path == "/auth/password")
     except ValueError as error:
         raise HTTPException(status_code=401, detail=str(error))
 
@@ -149,6 +150,14 @@ async def get_auth_context(
 def _require_role(context: Optional[AuthContext], allowed_roles: set[str]) -> None:
     if context is not None and context.role not in allowed_roles:
         raise HTTPException(status_code=403, detail="Your workspace role does not allow this action")
+
+
+def _require_provider_connection(connection_id, provider, model, api_key=None, base_url=None):
+    if connection_id:
+        return
+    demo = (provider or "").lower() in {"mock", "demo", "dummy"} or model == "mock"
+    if not demo or (api_key and api_key != "mock") or base_url:
+        raise HTTPException(status_code=400, detail="Live API runs require a workspace provider connection; raw keys and custom endpoints are not accepted on submission.")
 
 
 async def _audit(
@@ -377,13 +386,29 @@ async def health_check():
         health["issues"].append("Database is not reachable.")
         health["status"] = "degraded"
     health["worker"] = await asyncio.to_thread(_queue_worker.health)
-    if health["worker"]["status"] in {"unstarted", "stale"}:
+    if health["worker"]["status"] in {"unstarted", "stale", "failed"}:
         health["issues"].append(f"Evaluation worker status is {health['worker']['status']}.")
         health["status"] = "degraded"
     if health["worker"]["overdue_schedule_count"]:
         health["issues"].append("One or more active schedules are overdue.")
         health["status"] = "degraded"
     return HealthResponse(**health)
+
+
+@app.get("/health/live")
+async def liveness():
+    return {"status": "alive"}
+
+
+@app.get("/health/ready")
+async def readiness():
+    try:
+        health = await health_check()
+    except Exception:
+        raise HTTPException(status_code=503, detail="Readiness dependencies unavailable.")
+    if health.status != "ok":
+        raise HTTPException(status_code=503, detail="Service is not ready; inspect operator health.")
+    return {"status": "ready"}
 
 
 async def _owner_health() -> dict:
@@ -393,7 +418,7 @@ async def _owner_health() -> dict:
         health["issues"].append("Database is not reachable.")
         health["status"] = "degraded"
     health["worker"] = await asyncio.to_thread(_queue_worker.health)
-    if health["worker"]["status"] in {"unstarted", "stale"}:
+    if health["worker"]["status"] in {"unstarted", "stale", "failed"}:
         health["issues"].append(f"Evaluation worker status is {health['worker']['status']}.")
         health["status"] = "degraded"
     if health["worker"]["overdue_schedule_count"]:
@@ -460,7 +485,12 @@ async def apply_retention_settings(context: Optional[AuthContext] = Depends(get_
 
 
 @app.post("/auth/bootstrap", response_model=WorkspaceBootstrapResponse, status_code=201)
-async def bootstrap_workspace(req: WorkspaceBootstrapRequest):
+async def bootstrap_workspace(req: WorkspaceBootstrapRequest, x_setup_token: Optional[str] = Header(default=None)):
+    import secrets
+    settings = get_settings()
+    if settings.app_environment.lower() == "production" and (not settings.bootstrap_secret or
+            not secrets.compare_digest(x_setup_token or "", settings.bootstrap_secret)):
+        raise HTTPException(status_code=403, detail="The operator setup secret is required.")
     """Create the first local owner and claim pre-workspace project records."""
     try:
         context, token = await asyncio.to_thread(
@@ -575,7 +605,7 @@ async def grant_member_project_access(user_id: str, req: ProjectAccessRequest, c
 async def list_provider_connections(context: Optional[AuthContext] = Depends(get_auth_context)):
     if context is None:
         raise HTTPException(status_code=401, detail="Bootstrap an owner before configuring provider connections")
-    _require_role(context, WRITE_ROLES | {"viewer", "client_viewer"})
+    _require_role(context, WRITE_ROLES | {"viewer"})
     connections = await asyncio.to_thread(_provider_connection_service.list, context.workspace_id)
     return [_connection_to_response(connection) for connection in connections]
 
@@ -616,6 +646,7 @@ async def delete_provider_connection(
 
 @app.get("/evaluation-templates", response_model=list[EvaluationTemplateResponse])
 async def list_evaluation_templates(context: Optional[AuthContext] = Depends(get_auth_context)):
+    _require_role(context, WRITE_ROLES | {"viewer"})
     if context is None:
         raise HTTPException(status_code=401, detail="Workspace authentication is required")
     templates = await asyncio.to_thread(_agency_service.list_templates, context.workspace_id)
@@ -939,6 +970,8 @@ async def seed_agency_demo(context: Optional[AuthContext] = Depends(get_auth_con
 
 @app.post("/runs", response_model=RunResponse)
 async def create_run(req: RunRequest, context: Optional[AuthContext] = Depends(get_auth_context)):
+    _require_provider_connection(req.candidate_connection_id, req.candidate_provider, req.candidate_model, req.candidate_api_key, req.candidate_base_url)
+    _require_provider_connection(req.evaluator_connection_id, req.evaluator_provider, req.evaluator_model, req.evaluator_api_key)
     _require_role(context, WRITE_ROLES)
     if context is not None and req.dataset_path:
         raise HTTPException(status_code=400, detail="Workspace runs must use a registered dataset_id.")
@@ -1011,6 +1044,7 @@ async def create_run(req: RunRequest, context: Optional[AuthContext] = Depends(g
     try:
         candidate_provider = await asyncio.to_thread(
             ProviderFactory.create,
+            use_default_api_key=False,
             provider=candidate_provider_name,
             model_id=candidate_model_name,
             api_key=candidate_api_key,
@@ -1023,6 +1057,7 @@ async def create_run(req: RunRequest, context: Optional[AuthContext] = Depends(g
     try:
         evaluator_provider = await asyncio.to_thread(
             ProviderFactory.create,
+            use_default_api_key=False,
             provider=evaluator_provider_name,
             model_id=evaluator_model_name,
             api_key=evaluator_api_key,
@@ -1094,13 +1129,15 @@ async def cancel_run(run_id: str, context: Optional[AuthContext] = Depends(get_a
     return await get_run(run_id, context)
 
 
-@app.post("/runs/{run_id}/retry-now", response_model=RunStatusResponse)
+@app.post("/runs/{run_id}/retry", response_model=RunStatusResponse)
+@app.post("/runs/{run_id}/retry-now", response_model=RunStatusResponse, deprecated=True)
 async def retry_run_now(run_id: str, context: Optional[AuthContext] = Depends(get_auth_context)):
     run = _require_run_access(run_id, context, write=True)
-    if not await asyncio.to_thread(_queue_worker.retry_now, "evaluation_run", run_id):
+    retry_id = await asyncio.to_thread(_queue_worker.retry_now, "evaluation_run", run_id)
+    if not retry_id:
         raise HTTPException(status_code=409, detail="Only queued, failed, or interrupted runs can be retried")
     await _audit(context, "run.retry_requested", "evaluation_run", run_id, run.project_id)
-    return await get_run(run_id, context)
+    return await get_run(retry_id, context)
 
 
 @app.get("/runs/{run_id}", response_model=RunStatusResponse)
@@ -1133,6 +1170,9 @@ async def get_run(run_id: str, context: Optional[AuthContext] = Depends(get_auth
         evaluator_metrics = [
             EvaluatorMetric(
                 evaluator=name,
+                unverified_cases=data.get("unverified_cases", 0),
+                denominator_verified=data.get("denominator_verified", False),
+                backends=data.get("backends", []),
                 total_cases=data["total_cases"],
                 valid_evaluations=data["valid_evaluations"],
                 generation_errors=data["generation_errors"],
@@ -1148,6 +1188,7 @@ async def get_run(run_id: str, context: Optional[AuthContext] = Depends(get_auth
 
     return RunStatusResponse(
         run_id=run_id,
+        parent_run_id=run.parent_run_id,
         status=status,
         metrics=evaluator_metrics,
         error=error_message,
@@ -1174,7 +1215,7 @@ async def list_runs(baseline_only: bool = Query(default=False, description="List
     with get_db() as db:
         query = db.query(EvaluationRunDB)
         if context is not None:
-            query = query.join(ProjectDB, EvaluationRunDB.project_id == ProjectDB.id).filter(ProjectDB.workspace_id == context.workspace_id)
+            query = query.filter(EvaluationRunDB.project_id.in_(_identity_service.accessible_project_ids(context)))
         if baseline_only:
             query = query.filter(EvaluationRunDB.is_baseline == True)
         if status:
@@ -1215,8 +1256,8 @@ async def mark_run_as_baseline(run_id: str, context: Optional[AuthContext] = Dep
 async def compare_run_to_baseline(
     run_id: str,
     baseline_run_id: str = Query(..., description="Completed run previously marked as a baseline"),
-    coverage_minimum: float = Query(default=0.95, ge=0.0, le=1.0),
-    exact_match_pass_rate_max_drop: float = Query(default=0.05, ge=0.0, le=1.0),
+    coverage_minimum: Optional[float] = Query(default=None, ge=0.0, le=1.0),
+    exact_match_pass_rate_max_drop: Optional[float] = Query(default=None, ge=0.0, le=1.0),
     context: Optional[AuthContext] = Depends(get_auth_context),
 ):
     _require_run_access(run_id, context)
@@ -1337,10 +1378,11 @@ async def export_run_report(
 
 @app.get("/projects", response_model=ProjectsListResponse)
 async def list_projects(context: Optional[AuthContext] = Depends(get_auth_context)):
+    allowed = set(_identity_service.accessible_project_ids(context)) if context else None
     return ProjectsListResponse(
         projects=[_project_to_response(project) for project in _project_service.list_projects(
             context.workspace_id if context else None
-        )]
+        ) if allowed is None or project.id in allowed]
     )
 
 
@@ -1420,7 +1462,8 @@ async def list_datasets(
     if project_id:
         _require_project_access(project_id, context)
     datasets = _dataset_service.list_datasets(
-        tag=tag, search=search, project_id=project_id, workspace_id=context.workspace_id if context else None
+        tag=tag, search=search, project_id=project_id, workspace_id=context.workspace_id if context else None,
+        allowed_project_ids=_identity_service.accessible_project_ids(context) if context else None,
     )
     return DatasetsListResponse(
         datasets=[_dataset_to_response(d) for d in datasets]
@@ -1587,6 +1630,7 @@ async def create_pairwise_run(req: PairwiseRunRequest, context: Optional[AuthCon
             raise HTTPException(status_code=400, detail=f"Failed to load dataset: {e}")
 
     async def resolve_connection(connection_id, provider, model, api_key, base_url, allow_unauthenticated, label):
+        _require_provider_connection(connection_id, provider, model, api_key, base_url)
         if connection_id:
             if context is None:
                 raise HTTPException(status_code=401, detail="Provider connections require workspace authentication")
@@ -1617,6 +1661,7 @@ async def create_pairwise_run(req: PairwiseRunRequest, context: Optional[AuthCon
     try:
         provider_a = await asyncio.to_thread(
             ProviderFactory.create,
+            use_default_api_key=False,
             provider=model_a_provider,
             model_id=model_a_model,
             api_key=model_a_api_key,
@@ -1629,6 +1674,7 @@ async def create_pairwise_run(req: PairwiseRunRequest, context: Optional[AuthCon
     try:
         provider_b = await asyncio.to_thread(
             ProviderFactory.create,
+            use_default_api_key=False,
             provider=model_b_provider,
             model_id=model_b_model,
             api_key=model_b_api_key,
@@ -1641,6 +1687,7 @@ async def create_pairwise_run(req: PairwiseRunRequest, context: Optional[AuthCon
     try:
         judge_provider = await asyncio.to_thread(
             ProviderFactory.create,
+            use_default_api_key=False,
             provider=judge_provider_name,
             model_id=judge_model_name,
             api_key=judge_api_key,
@@ -1720,13 +1767,15 @@ async def cancel_pairwise_run(run_id: str, context: Optional[AuthContext] = Depe
     return await get_pairwise_run(run_id, context=context)
 
 
-@app.post("/pairwise-runs/{run_id}/retry-now", response_model=PairwiseRunStatusResponse)
+@app.post("/pairwise-runs/{run_id}/retry", response_model=PairwiseRunStatusResponse)
+@app.post("/pairwise-runs/{run_id}/retry-now", response_model=PairwiseRunStatusResponse, deprecated=True)
 async def retry_pairwise_run_now(run_id: str, context: Optional[AuthContext] = Depends(get_auth_context)):
     run = _require_pairwise_run_access(run_id, context, write=True)
-    if not await asyncio.to_thread(_queue_worker.retry_now, "pairwise_run", run_id):
+    retry_id = await asyncio.to_thread(_queue_worker.retry_now, "pairwise_run", run_id)
+    if not retry_id:
         raise HTTPException(status_code=409, detail="Only queued, failed, or interrupted runs can be retried")
     await _audit(context, "pairwise_run.retry_requested", "pairwise_run", run_id, run.project_id)
-    return await get_pairwise_run(run_id, context=context)
+    return await get_pairwise_run(retry_id, context=context)
 
 
 @app.get("/pairwise-runs/{run_id}", response_model=PairwiseRunStatusResponse)
@@ -1783,6 +1832,7 @@ async def get_pairwise_run(run_id: str, include_comparisons: bool = Query(defaul
 
     return PairwiseRunStatusResponse(
         run_id=run_id,
+        parent_run_id=run.parent_run_id,
         model_a_name=model_a_name,
         model_b_name=model_b_name,
         status=status,
@@ -1811,7 +1861,7 @@ async def list_pairwise_runs(status: Optional[RunStatus] = Query(default=None), 
     with get_db() as db:
         query = db.query(PairwiseRunDB)
         if context is not None:
-            query = query.join(ProjectDB, PairwiseRunDB.project_id == ProjectDB.id).filter(ProjectDB.workspace_id == context.workspace_id)
+            query = query.filter(PairwiseRunDB.project_id.in_(_identity_service.accessible_project_ids(context)))
         if status:
             query = query.filter(PairwiseRunDB.status == status.value)
         db_runs = query.order_by(PairwiseRunDB.created_at.desc()).all()

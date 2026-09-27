@@ -5,6 +5,7 @@ import html
 import io
 import json
 import re
+from collections import Counter
 from datetime import datetime, timezone
 from typing import Any
 
@@ -74,6 +75,10 @@ class ReportService:
                 .all()
             )
             results = [_result_payload(result) for result in result_records]
+            identities = Counter((r["example_id"], r["evaluator"]) for r in results)
+            for result in results:
+                if identities[(result["example_id"], result["evaluator"])] > 1:
+                    result.update(outcome="unverified", score=None, sanitized_error="Ambiguous historical duplicate; excluded from quality metrics.")
             project = (
                 {
                     "id": run.project.id,
@@ -104,6 +109,7 @@ class ReportService:
             result for result in results if result["outcome"] == EvaluationOutcome.EVALUATION_ERROR.value
         ]
         failures = [*generation_errors, *evaluation_errors]
+        quality_failures = [r for r in results if r["outcome"] == "evaluated" and r["score"] is not None and r["score"] < .5]
         metrics = get_run_metrics(run_id)
         return {
             "report_type": "evaluation_summary",
@@ -113,13 +119,15 @@ class ReportService:
             "metrics_by_evaluator": metrics.get("evaluators", {}),
             "failure_counts": {
                 "total_result_records": len(results),
-                "total_examples": len({result["example_id"] for result in results}),
+                "total_examples": metrics.get("total_examples", len({result["example_id"] for result in results})),
+                "quality_failures": len(quality_failures),
                 "generation_errors": len(generation_errors),
                 "evaluation_errors": len(evaluation_errors),
                 "failed_result_records": len(failures),
                 "failed_examples": len({result["example_id"] for result in failures}),
             },
             "example_level_failures": failures,
+            "quality_failures": quality_failures,
             "results": results,
         }
 
@@ -145,7 +153,11 @@ class ReportService:
             ],
         )
         writer.writeheader()
-        writer.writerows(report["results"])
+        def cell(value):
+            if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@", "\t", "\r", "\n")):
+                return "'" + value
+            return value
+        writer.writerows({key: cell(value) for key, value in row.items()} for row in report["results"])
         return output.getvalue()
 
     @staticmethod
@@ -189,6 +201,9 @@ class ReportService:
         ) or "<tr><td colspan='8'>No generation or evaluation failures were recorded.</td></tr>"
 
         run = report["run"]
+        quality_rows = "".join(f"<tr><td>{text(r['example_id'])}</td><td>{text(r['evaluator'])}</td>"
+                               f"<td>{text(r['score'])}</td><td><pre>{text(r['output'])}</pre></td>"
+                               f"<td>{text(r['judge_explanation'])}</td></tr>" for r in report.get("quality_failures", []))
         counts = report["failure_counts"]
         configuration = html.escape(json.dumps(run["configuration"], indent=2, ensure_ascii=False))
         return f"""<!doctype html>
@@ -212,6 +227,7 @@ th {{ background: #eaf1f8; }} pre {{ white-space: pre-wrap; margin: 0; font-fami
 <h2>Baseline Outcome</h2><div class="summary">{text((report.get('baseline_outcome') or {}).get('status'))}: {text(' '.join((report.get('baseline_outcome') or {}).get('reasons', [])))}</div>
 <h2>Example-level Failures</h2><table><thead><tr><th>Example</th><th>Evaluator</th><th>Outcome</th><th>Prompt</th><th>Output</th><th>Expected answer</th><th>Judge explanation</th><th>Sanitized error</th></tr></thead><tbody>{failure_rows}</tbody></table>
 <h2>Run Configuration</h2><p>Configuration verified: {text(run['configuration_verified'])}</p><pre class="meta">{configuration}</pre>
+<h2>Quality Failures (score below 0.5)</h2><table><thead><tr><th>Example</th><th>Evaluator</th><th>Score</th><th>Output</th><th>Explanation</th></tr></thead><tbody>{quality_rows or '<tr><td colspan="5">No verified low-scoring results.</td></tr>'}</tbody></table>
 </body></html>"""
 
     @staticmethod

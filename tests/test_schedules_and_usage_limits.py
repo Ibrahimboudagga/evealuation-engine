@@ -47,6 +47,8 @@ def test_due_daily_schedule_creates_a_run_and_worker_health_is_persisted():
     )
 
     worker = QueueWorker(worker_id="schedule-test-worker", retry_base_seconds=0, retry_cap_seconds=0)
+    assert ScheduleService().set_active("workspace-schedule", schedule.id, False).executions == []
+    assert ScheduleService().set_active("workspace-schedule", schedule.id, True).executions == []
     assert asyncio.run(worker.run_once())
 
     with get_db() as db:
