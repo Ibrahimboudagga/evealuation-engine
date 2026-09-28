@@ -1,5 +1,12 @@
 # LLM Evaluation Engine: Deep Project Guide
 
+> September 2026 update: the detailed original guide below describes the
+> earlier account/runner architecture. Read [REANALYSIS_REMEDIATION.md](REANALYSIS_REMEDIATION.md)
+> and [SCENARIO_EVALUATION.md](SCENARIO_EVALUATION.md) for the current scoring
+> contract, independent schedule dispatch, workspace scenario evidence workflow,
+> and verified deployment limits. This repository is a controlled pilot
+> candidate; source features alone do not establish production readiness.
+
 > Repository state covered: feature/admin-console-pilot-rehearsal, 25 September 2026.
 >
 > This guide explains the product, its technical design, the full evaluation

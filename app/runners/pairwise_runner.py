@@ -26,9 +26,10 @@ from app.services.run_configuration import (
     build_pairwise_run_configuration,
     dataset_path_snapshot,
     dataset_version_snapshot,
+    assert_execution_contract,
 )
 from app.services.activation_service import ActivationService
-from app.services.result_integrity import expected_cases, authoritative_records
+from app.services.result_integrity import expected_cases, authoritative_records, is_valid_quality_score
 
 log = structlog.get_logger()
 
@@ -323,6 +324,12 @@ class PairwiseEvaluationRunner:
                 result = None
                 judge_error = sanitize_error(e)
 
+            if result is not None and result.outcome == EvaluationOutcome.EVALUATED and not (
+                    result.winner in {"A", "B", "tie"} and is_valid_quality_score(result.score_a)
+                    and is_valid_quality_score(result.score_b)):
+                result = None
+                judge_error = "Judge returned an invalid comparison; scores and winner were discarded."
+
             # Un-swap the winner if needed
             if result is not None:
                 if result.outcome == EvaluationOutcome.EVALUATED:
@@ -429,6 +436,19 @@ class PairwiseEvaluationRunner:
             The run ID string.
         """
         self._raise_if_cancelled(run_id)
+        with get_db() as db:
+            saved_run = db.get(PairwiseRunDB, run_id)
+            saved_configuration = saved_run.run_configuration if saved_run else None
+        effective = build_pairwise_run_configuration(
+            dataset=(saved_configuration or {}).get("dataset", {}),
+            provider_a=self.provider_a, provider_b=self.provider_b, evaluator=self.evaluator,
+            concurrency_limit=self.concurrency_limit,
+            execution_timeout_seconds=self.execution_timeout_seconds,
+            result_batch_size=self.result_batch_size,
+            is_simulated=self._is_simulated(),
+            requested_configuration=self.requested_configuration,
+        )
+        assert_execution_contract(saved_configuration, effective)
         if dataset_id is not None:
             # New mode: load from DB
             with get_db() as db:
@@ -573,9 +593,9 @@ def get_pairwise_run_metrics(run_id: str) -> Dict[str, Any]:
         for comparison in comparisons
         if (
             comparison.outcome == EvaluationOutcome.EVALUATED.value
-            and comparison.winner is not None
-            and comparison.score_a is not None
-            and comparison.score_b is not None
+            and comparison.winner in {"A", "B", "tie"}
+            and is_valid_quality_score(comparison.score_a)
+            and is_valid_quality_score(comparison.score_b)
         )
     ]
     valid_comparisons = len(evaluated_comparisons)
@@ -583,7 +603,9 @@ def get_pairwise_run_metrics(run_id: str) -> Dict[str, Any]:
         comparison.outcome == EvaluationOutcome.GENERATION_ERROR.value
         for comparison in comparisons
     )
-    evaluation_errors = sum(
+    invalid_score_count = sum(c.outcome == EvaluationOutcome.EVALUATED.value
+                              and c not in evaluated_comparisons for c in comparisons)
+    evaluation_errors = invalid_score_count + sum(
         comparison.outcome == EvaluationOutcome.EVALUATION_ERROR.value
         for comparison in comparisons
     )
@@ -629,6 +651,7 @@ def get_pairwise_run_metrics(run_id: str) -> Dict[str, Any]:
         "unverified_cases": duplicates,
         "unexpected_cases": unexpected,
         "valid_comparisons": valid_comparisons,
+        "invalid_score_count": invalid_score_count,
         "generation_errors": generation_errors,
         "evaluation_errors": evaluation_errors,
         "error_count": generation_errors + evaluation_errors,
@@ -653,20 +676,19 @@ def get_pairwise_comparisons(run_id: str) -> List[Dict[str, Any]]:
             PairwiseComparisonDB.run_id == run_id
         ).all()
 
-    return [
-        {
-            "example_id": c.example_id,
-            "prompt": c.prompt,
-            "response_a": c.response_a,
-            "response_b": c.response_b,
-            "expected_output": c.expected_output,
-            "winner": c.winner,
-            "score_a": c.score_a,
-            "score_b": c.score_b,
-            "judge_reason": c.judge_reason,
-            "original_order": c.original_order,
-            "outcome": c.outcome,
-            "error_message": c.error_message,
-        }
-        for c in comparisons
-    ]
+    reviewed = []
+    for c in comparisons:
+        valid = (c.outcome == EvaluationOutcome.EVALUATED.value and c.winner in {"A", "B", "tie"}
+                 and is_valid_quality_score(c.score_a) and is_valid_quality_score(c.score_b))
+        invalid = c.outcome == EvaluationOutcome.EVALUATED.value and not valid
+        reviewed.append({
+            "example_id": c.example_id, "prompt": c.prompt,
+            "response_a": c.response_a, "response_b": c.response_b,
+            "expected_output": c.expected_output, "winner": c.winner if valid else None,
+            "score_a": c.score_a if valid else None, "score_b": c.score_b if valid else None,
+            "judge_reason": c.judge_reason, "original_order": c.original_order,
+            "outcome": "evaluation_error" if invalid else c.outcome,
+            "error_message": ("Stored comparison is invalid; excluded from quality and Elo metrics." if invalid else
+                              sanitize_error(c.error_message) if c.error_message else None),
+        })
+    return reviewed

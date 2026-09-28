@@ -6,3 +6,4 @@ __pycache__/
 .pytest_cache/
 .pytest_tmp/
 scenario-output/
+.pytest_tmp_*/

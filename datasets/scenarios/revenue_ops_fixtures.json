@@ -1,0 +1,14 @@
+{
+  "revenue-ops-synthetic": {
+    "output": {"summary": "Synthetic sample only: observed total is 180; this is not reviewed business-quality evidence."},
+    "simulated": true,
+    "revenue_ops": {
+      "hotel_id": "demo-hotel", "date_from": "2026-09-01", "date_to": "2026-09-02",
+      "day_lt": [{"day": "2026-09-01", "lt": 1, "value": 100}, {"day": "2026-09-02", "lt": 1, "value": 80}],
+      "clustering_inputs": [{"day": "2026-09-01", "lt": 1, "value": 100}, {"day": "2026-09-02", "lt": 1, "value": 80}],
+      "chosen_cluster": "synthetic-cluster-a",
+      "anomaly_labels": [{"day": "2026-09-01", "lt": 1, "anomalous": false}, {"day": "2026-09-02", "lt": 1, "anomalous": true}],
+      "report_calculations": {"total": 180}, "narrative_claims": {"total": 180}
+    }
+  }
+}

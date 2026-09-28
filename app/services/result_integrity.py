@@ -1,6 +1,7 @@
 """Expected-suite denominators and conservative handling of legacy duplicates."""
 
 from collections import Counter
+from math import isfinite
 
 from app.database.models import DatasetVersionDB
 from app.services.run_configuration import case_manifest
@@ -25,3 +26,8 @@ def authoritative_records(records, expected):
     ambiguous = sum(count > 1 for key, count in counts.items() if key in expected)
     unexpected = len(set(counts) - expected)
     return valid, ambiguous, unexpected
+
+
+def is_valid_quality_score(score):
+    """Accept normalized finite numbers only; bools are not quality scores."""
+    return isinstance(score, (int, float)) and not isinstance(score, bool) and 0 <= score <= 1 and isfinite(score)

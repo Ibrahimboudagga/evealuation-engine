@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Literal, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.schemas.outcomes import EvaluationOutcome
 
@@ -14,6 +14,14 @@ class PairwiseComparisonResult(BaseModel):
     outcome: EvaluationOutcome = Field(default=EvaluationOutcome.EVALUATED, description="Whether judging completed or failed")
     error_message: Optional[str] = Field(default=None, description="Sanitized error when judging did not complete")
     metadata: Optional[Dict[str, Any]] = Field(default=None, description="Optional metadata")
+
+    @field_validator("score_a", "score_b", mode="before")
+    @classmethod
+    def normalized_score(cls, value):
+        from app.services.result_integrity import is_valid_quality_score
+        if value is not None and not is_valid_quality_score(value):
+            raise ValueError("Comparison scores must be finite numbers between zero and one.")
+        return value
 
 
 class BasePairwiseEvaluator(ABC):

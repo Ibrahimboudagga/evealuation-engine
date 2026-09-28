@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, model_validator
 
 from app.schemas.outcomes import EvaluationOutcome, RunStatus
+from app.schemas.release import EvaluatorSettings, ReleaseRules
 
 
 # ── Run Schemas ──────────────────────────────────────────────
@@ -30,7 +31,8 @@ class RunRequest(BaseModel):
     concurrency: int = Field(default=5, ge=1, le=50, description="Maximum parallel evaluations")
     timeout_seconds: float = Field(default=60.0, gt=0, le=600, description="Per-provider call timeout")
     judge_prompt_template: Optional[str] = Field(default=None, description="Optional custom judge prompt template text")
-    release_rules: Optional[Dict[str, Any]] = Field(default=None, description="Saved template release thresholds")
+    release_rules: Optional[ReleaseRules] = Field(default=None, description="Evaluator and slice release thresholds")
+    evaluator_settings: Dict[str, EvaluatorSettings] = Field(default_factory=dict)
     report_preferences: Optional[Dict[str, Any]] = Field(default=None, description="Saved template report preferences")
 
     @model_validator(mode="after")
@@ -146,6 +148,8 @@ class EvaluationTemplateCreateRequest(BaseModel):
     coverage_minimum: float = Field(default=0.95, ge=0, le=1)
     exact_match_pass_rate_max_drop: float = Field(default=0.05, ge=0, le=1)
     report_preferences: Dict[str, Any] = Field(default_factory=dict)
+    release_rules: Optional[ReleaseRules] = None
+    evaluator_settings: Dict[str, EvaluatorSettings] = Field(default_factory=dict)
 
 
 class EvaluationTemplateResponse(EvaluationTemplateCreateRequest):
@@ -344,6 +348,7 @@ class EvaluatorMetric(BaseModel):
     """Aggregated metric for a single evaluator within a run."""
     evaluator: str = Field(..., description="Name of the evaluator")
     unverified_cases: int = 0
+    invalid_score_count: int = 0
     denominator_verified: bool = False
     backends: List[str] = Field(default_factory=list)
     total_cases: int = Field(..., description="All expected cases for this evaluator")
@@ -351,7 +356,8 @@ class EvaluatorMetric(BaseModel):
     generation_errors: int = Field(..., description="Cases where candidate generation failed")
     evaluation_errors: int = Field(..., description="Cases where evaluation or judging failed")
     error_count: int = Field(..., description="Generation and evaluation errors combined")
-    passing_evaluations: int = Field(..., description="Valid evaluations with score >= 0.5")
+    passing_evaluations: int = Field(..., description="Valid evaluations meeting the saved evaluator threshold")
+    pass_threshold: float = Field(default=0.5, ge=0, le=1)
     evaluation_coverage: float = Field(..., description="Valid evaluations divided by total cases")
     mean_score: Optional[float] = Field(default=None, description="Average score over valid evaluations only")
     pass_rate: Optional[float] = Field(default=None, description="Passing valid evaluations divided by valid evaluations")
@@ -409,6 +415,10 @@ class BaselineMarkResponse(BaseModel):
 
 class EvaluatorBaselineComparison(BaseModel):
     evaluator: str
+    slice_name: Optional[str] = None
+    baseline_valid_evaluations: Optional[int] = None
+    current_valid_evaluations: Optional[int] = None
+    minimum_valid_cases: Optional[int] = None
     baseline_average_score: Optional[float] = None
     current_average_score: Optional[float] = None
     average_score_delta: Optional[float] = None
@@ -427,7 +437,7 @@ class RunComparisonResponse(BaseModel):
     run_id: str
     baseline_run_id: str
     status: Literal["passed", "regressed", "inconclusive"]
-    rules: Dict[str, Optional[float]]
+    rules: Dict[str, Any]
     reasons: List[str] = Field(default_factory=list)
     comparisons: List[EvaluatorBaselineComparison] = Field(default_factory=list)
 

@@ -7,7 +7,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python: ['3.11', '3.14']
+        python: ['3.11', '3.12', '3.14']
     services:
       postgres:
         image: postgres:16-alpine
@@ -29,10 +29,27 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: python -m pip install -r requirements.txt
       - run: python -m pytest -q
-      - name: PostgreSQL startup with an encoded password and long dataset path
+      - name: Install PostgreSQL backup client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-16
+          echo "/usr/lib/postgresql/16/bin" >> "$GITHUB_PATH"
+      - name: Create disposable restore database
+        run: createdb evaluation_restore
+        env:
+          PGHOST: localhost
+          PGUSER: evaluation
+          PGPASSWORD: 'ci%encoded/pass'
+      - name: PostgreSQL startup, backup and verified restore
         run: python -m scripts.deployment_smoke
         env:
           DATABASE_URL: 'postgresql+psycopg://evaluation:ci%25encoded%2Fpass@localhost:5432/evaluation_test'
+          RESTORE_DATABASE_URL: 'postgresql+psycopg://evaluation:ci%25encoded%2Fpass@localhost:5432/evaluation_restore'
+          SMOKE_EVIDENCE_PATH: deployment-smoke-evidence.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: restore-evidence-python-${{ matrix.python }}
+          path: deployment-smoke-evidence.json
       - name: Record resolved runtime dependencies
         run: python -m pip freeze > resolved-dependencies.txt
       - uses: actions/upload-artifact@v4

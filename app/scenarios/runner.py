@@ -52,7 +52,7 @@ async def run_scenarios(scenarios: list[Scenario], adapter: Adapter, output_dir,
                 "started_at": datetime.now(timezone.utc).isoformat(), "finished_at": None,
                 "dataset_sha256": dataset_sha256, "timeout_seconds": timeout_seconds,
                 "adapter": type(adapter).__name__, "target_label": target_label,
-                "simulated": adapter.simulated, "scenarios": [s.model_dump() for s in scenarios]}
+                "simulated": adapter.simulated, "scenarios": [s.model_dump(mode="json") for s in scenarios]}
     results = []
 
     def save_manifest():

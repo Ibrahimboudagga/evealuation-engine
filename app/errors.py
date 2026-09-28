@@ -25,3 +25,21 @@ def sanitize_error(error: BaseException | str, max_length: int = 500) -> str:
     message = _OPENAI_STYLE_KEY.sub("[REDACTED]", message)
     message = _GOOGLE_STYLE_KEY.sub("[REDACTED]", message)
     return message[:max_length]
+
+
+# Preserve evidence formatting; operational errors use the compact helper above.
+_EVIDENCE_SECRET = re.compile(
+    r"""(?ix)(?P<prefix>\b(?:api[_ -]?key|authorization|bearer|(?:access|refresh|id)[_ -]?token|token|password|secret)\b["']?[ \t]*[:=][ \t]*(?:bearer[ \t]+)?)
+    (?P<value>"[^"\r\n]*"|'[^'\r\n]*'|\[REDACTED\]|[^\s,;}"'\]]+)"""
+)
+
+
+def redact_secrets_text(value: str) -> str:
+    """Mask recognizable credential assignments without normalizing whitespace."""
+    def replacement(match):
+        original = match.group("value")
+        quote = original[0] if original.startswith(('"', "'")) else ""
+        return match.group("prefix") + quote + "[REDACTED]" + quote
+    value = _EVIDENCE_SECRET.sub(replacement, value)
+    value = _OPENAI_STYLE_KEY.sub("[REDACTED]", value)
+    return _GOOGLE_STYLE_KEY.sub("[REDACTED]", value)

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import inspect
+from importlib.metadata import PackageNotFoundError, version
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Iterable, Optional
@@ -11,7 +13,8 @@ from typing import Any, Iterable, Optional
 from app.providers.base import BaseProvider
 
 
-CONFIGURATION_SCHEMA_VERSION = 1
+CONFIGURATION_SCHEMA_VERSION = 2
+MEASUREMENT_CONTRACT_VERSION = 2
 _SECRET_KEY_PARTS = ("api_key", "apikey", "authorization", "password", "secret", "token")
 
 
@@ -27,13 +30,50 @@ def _redact_secrets(value: Any) -> Any:
     return value
 
 
+def implementation_digest(implementation: type) -> str | None:
+    """Hash executable source (including base classes), never a literal version label."""
+    modules = {}
+    for cls in implementation.__mro__:
+        if cls is object:
+            continue
+        module = inspect.getmodule(cls)
+        path = getattr(module, "__file__", None)
+        if not path or not Path(path).is_file():
+            return None
+        try:
+            modules[module.__name__] = Path(path).read_text(encoding="utf-8").replace("\r\n", "\n")
+        except (OSError, UnicodeError):
+            return None
+    return sha256(json.dumps(modules, sort_keys=True).encode()).hexdigest()
+
+
+def dependency_versions() -> dict[str, str | None]:
+    versions = {}
+    for package in ("pydantic", "json-repair", "sentence-transformers", "torch", "openai", "anthropic", "cohere", "google-generativeai", "numpy"):
+        try:
+            versions[package] = version(package)
+        except PackageNotFoundError:
+            versions[package] = None
+    return versions
+
+
 def provider_snapshot(provider: BaseProvider) -> dict[str, Any]:
     """Describe a provider without retaining its credentials."""
     snapshot: dict[str, Any] = {
         "implementation": f"{type(provider).__module__}.{type(provider).__name__}",
         "model": getattr(provider, "model_name", "unknown-model"),
         "simulated": bool(getattr(provider, "is_mock", False)),
+        "implementation_sha256": implementation_digest(type(provider)),
+        # The implementation digest also pins SDK call defaults. Only an explicit
+        # allowlist is retained; provider clients and credentials never enter snapshots.
+        "generation_settings": _redact_secrets(deepcopy(getattr(provider, "generation_settings", {}))),
     }
+    if type(provider).__module__ in ("app.providers.openai", "app.providers.anthropic", "app.providers.gemini"):
+        snapshot["generation_settings"] = {"temperature": 0.0}
+        if type(provider).__module__ == "app.providers.anthropic":
+            snapshot["generation_settings"]["max_tokens"] = 1024
+    elif type(provider).__module__ == "app.providers.cohere":
+        snapshot["generation_settings"] = {"temperature": "provider_default"}
     base_url = getattr(provider, "base_url", None)
     if base_url:
         snapshot["base_url"] = base_url
@@ -42,14 +82,24 @@ def provider_snapshot(provider: BaseProvider) -> dict[str, Any]:
     return snapshot
 
 
-def evaluator_snapshots(evaluators: Iterable[Any]) -> list[dict[str, Any]]:
+def evaluator_snapshots(evaluators: Iterable[Any], settings: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """Capture evaluator identities and their effective prompt settings."""
+    from app.schemas.release import EvaluatorSettings
     snapshots = []
+    settings = settings or {}
+    evaluators = list(evaluators)
+    unknown = set(settings) - {e.name for e in evaluators}
+    if unknown:
+        raise ValueError("Settings refer to unknown evaluators: " + ", ".join(sorted(unknown)))
     for evaluator in evaluators:
         snapshot: dict[str, Any] = {
             "name": evaluator.name,
             "implementation": f"{type(evaluator).__module__}.{type(evaluator).__name__}",
-            "version": "1",
+            "contract_version": MEASUREMENT_CONTRACT_VERSION,
+            "implementation_sha256": implementation_digest(type(evaluator)),
+            "dependencies": dependency_versions(),
+            "settings": EvaluatorSettings.model_validate(settings.get(evaluator.name, {})).model_dump(),
+            "calibration": {"status": "unverified", "reviewed_cases": 0},
         }
         if hasattr(evaluator, "model_name"):
             snapshot["model_name"] = evaluator.model_name
@@ -86,7 +136,8 @@ def case_manifest(content: str) -> dict[str, Any]:
         raise ValueError("Dataset is empty.")
     ids = sorted(e.id for e in examples)
     return {"expected_case_ids": ids, "example_count": len(ids),
-            "expected_case_ids_sha256": sha256(json.dumps(ids).encode()).hexdigest()}
+            "expected_case_ids_sha256": sha256(json.dumps(ids).encode()).hexdigest(),
+            "case_metadata": {e.id: _redact_secrets(e.metadata or {}) for e in examples}}
 
 
 def dataset_version_snapshot(dataset: Any, version: Any) -> dict[str, Any]:
@@ -119,7 +170,7 @@ def build_single_run_configuration(
         "run_type": "single_model",
         "dataset": dataset,
         "candidate": provider_snapshot(provider),
-        "evaluators": evaluator_snapshots(evaluators),
+        "evaluators": evaluator_snapshots(evaluators, (requested_configuration or {}).get("evaluator_settings")),
         "execution": {
             "concurrency_limit": concurrency_limit,
             "timeout_seconds": execution_timeout_seconds,
@@ -133,12 +184,18 @@ def build_single_run_configuration(
 
 
 def compatibility_fingerprint(config: dict[str, Any] | None) -> str | None:
-    if not config:
+    if not config or config.get("schema_version") != CONFIGURATION_SCHEMA_VERSION:
         return None
     dataset = config.get("dataset") or {}
     if not dataset.get("content_sha256") or not dataset.get("expected_case_ids") or not config.get("evaluators"):
         return None
-    contract = {"dataset_sha256": dataset["content_sha256"],
+    evaluators = config["evaluators"]
+    if any(e.get("contract_version") != MEASUREMENT_CONTRACT_VERSION
+           or not e.get("implementation_sha256") or not e.get("settings")
+           or (e.get("provider") is not None and not e["provider"].get("implementation_sha256"))
+           for e in evaluators):
+        return None
+    contract = {"contract_version": MEASUREMENT_CONTRACT_VERSION, "dataset_sha256": dataset["content_sha256"],
                 "case_ids": sorted(dataset["expected_case_ids"]),
                 "evaluators": sorted(config["evaluators"], key=lambda e: e["name"]),
                 "is_simulated": config.get("is_simulated"), "run_type": config.get("run_type")}
@@ -163,12 +220,7 @@ def build_pairwise_run_configuration(
         "dataset": dataset,
         "model_a": provider_snapshot(provider_a),
         "model_b": provider_snapshot(provider_b),
-        "judge": {
-            "name": evaluator.name,
-            "implementation": f"{type(evaluator).__module__}.{type(evaluator).__name__}",
-            "prompt_template": getattr(evaluator, "prompt_template", None),
-            "provider": provider_snapshot(evaluator.provider),
-        },
+        "judge": evaluator_snapshots([evaluator])[0],
         "execution": {
             "concurrency_limit": concurrency_limit,
             "timeout_seconds": execution_timeout_seconds,
@@ -177,3 +229,13 @@ def build_pairwise_run_configuration(
         "is_simulated": is_simulated,
         "request": _redact_secrets(deepcopy(requested_configuration or {})),
     }
+
+
+def assert_execution_contract(saved: dict[str, Any] | None, effective: dict[str, Any]) -> None:
+    """Fail closed when queued work would run a different measurement or target."""
+    if not saved or saved.get("schema_version") != CONFIGURATION_SCHEMA_VERSION:
+        raise ValueError("Run execution contract is legacy or unverified; submit a fresh run.")
+    sections = ("candidate", "evaluators") if effective["run_type"] == "single_model" else ("model_a", "model_b", "judge")
+    for key in ("run_type", "is_simulated", "execution", *sections):
+        if saved.get(key) != effective.get(key):
+            raise ValueError(f"Run execution contract changed ({key}); submit a fresh run with the current configuration.")

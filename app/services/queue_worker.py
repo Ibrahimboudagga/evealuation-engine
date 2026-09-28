@@ -93,8 +93,11 @@ class QueueWorker:
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
         self._task: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
+        self._schedule_task: Optional[asyncio.Task] = None
         self._active_claim = None
         self._loop_error = None
+        self._schedule_error = None
+        self._schedule_last_dispatch_at = None
         self._operations = OperationsService()
         self._connections = ProviderConnectionService()
         self._schedules = ScheduleService()
@@ -105,8 +108,13 @@ class QueueWorker:
         await asyncio.to_thread(self._heartbeat)
         self._task = asyncio.create_task(self._loop(), name=f"evaluation-queue-{self.worker_id}")
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        self._schedule_task = asyncio.create_task(self._schedule_loop())
 
     async def stop(self) -> None:
+        if self._schedule_task:
+            self._schedule_task.cancel()
+            await asyncio.gather(self._schedule_task, return_exceptions=True)
+            self._schedule_task = None
         if self._heartbeat_task:
             self._heartbeat_task.cancel()
             await asyncio.gather(self._heartbeat_task, return_exceptions=True)
@@ -122,13 +130,35 @@ class QueueWorker:
     async def _loop(self) -> None:
         while True:
             try:
-                processed = await self.run_once()
+                processed = await self.run_once(dispatch_schedules=False)
                 self._loop_error = None
             except Exception as error:
                 self._loop_error = sanitize_error(error)
                 processed = False
             if not processed:
                 await asyncio.sleep(self.poll_interval_seconds)
+
+    async def _schedule_loop(self) -> None:
+        """Enqueue due occurrences independently of the single execution slot."""
+        while True:
+            try:
+                # Shield the transaction: shutdown waits for its commit/rollback
+                # before closing the database rather than abandoning a thread.
+                dispatch = asyncio.create_task(asyncio.to_thread(self._schedules.trigger_due))
+                try:
+                    await asyncio.shield(dispatch)
+                except asyncio.CancelledError:
+                    # Preserve shutdown cancellation even if the transaction
+                    # raises while finishing its rollback.
+                    await asyncio.gather(dispatch, return_exceptions=True)
+                    raise
+                self._schedule_last_dispatch_at = utcnow()
+                self._schedule_error = None
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                self._schedule_error = sanitize_error(error)
+            await asyncio.sleep(self.poll_interval_seconds)
 
     async def _heartbeat_loop(self) -> None:
         while True:
@@ -173,7 +203,10 @@ class QueueWorker:
         worker_status = "unstarted" if not state else "working" if state.claimed_run_id else "healthy"
         if heartbeat_age_seconds is not None and heartbeat_age_seconds > 120:
             worker_status = "stale"
-        if self._loop_error or (self._task is not None and self._task.done()):
+        if (self._loop_error or self._schedule_error
+                or (self._task is not None and self._task.done())
+                or (self._heartbeat_task is not None and self._heartbeat_task.done())
+                or (self._schedule_task is not None and self._schedule_task.done())):
             worker_status = "failed"
         return {
             "worker_id": self.worker_id,
@@ -188,6 +221,9 @@ class QueueWorker:
             "failed_run_count": failed_run_count,
             "failed_count": failed_run_count,
             "overdue_schedule_count": self._schedules.overdue_count(),
+            "schedule_dispatch_status": "failed" if self._schedule_error else (
+                "healthy" if self._schedule_last_dispatch_at else "unstarted"),
+            "schedule_last_dispatch_at": self._schedule_last_dispatch_at,
         }
 
     def _record(
@@ -505,9 +541,10 @@ class QueueWorker:
             {"worker_id": self.worker_id, "error": sanitize_error(error)},
         )
 
-    async def run_once(self) -> bool:
+    async def run_once(self, *, dispatch_schedules: bool = True) -> bool:
         self._heartbeat()
-        schedule_result = await asyncio.to_thread(self._schedules.trigger_due)
+        schedule_result = (await asyncio.to_thread(self._schedules.trigger_due)
+                           if dispatch_schedules else {"triggered": 0, "failed": 0})
         claimed = await asyncio.to_thread(self.claim_next)
         if not claimed:
             return bool(schedule_result["triggered"] or schedule_result["failed"])

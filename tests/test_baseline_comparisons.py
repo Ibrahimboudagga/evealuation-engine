@@ -1,3 +1,7 @@
+import json
+from app.evaluators.registry import EvaluatorRegistry
+from app.providers.factory import ProviderFactory
+from app.services.run_configuration import evaluator_snapshots
 from fastapi.testclient import TestClient
 
 from app.api.main import app
@@ -18,7 +22,12 @@ def _add_run(run_id: str, *, status: str = RunStatus.COMPLETED.value, exact_scor
                 status=status,
                 project_id=None,
                 configuration_verified=True,
-                run_configuration_json='{"run_type":"single_model","dataset":{"content_sha256":"fixture-content","expected_case_ids":["case-1"]},"evaluators":[{"name":"exact_match","version":"1"},{"name":"llm_judge","version":"1"}],"is_simulated":false}',
+                is_simulated=True,
+                run_configuration_json=json.dumps({"schema_version": 2, "run_type": "single_model",
+                    "dataset": {"content_sha256": "fixture-content", "expected_case_ids": ["case-1"]},
+                    "evaluators": evaluator_snapshots([e for e in EvaluatorRegistry(
+                        ProviderFactory.create("mock", "mock")).get_all() if e.name in {"exact_match", "llm_judge"}]),
+                    "is_simulated": True}),
             )
         )
         if status == RunStatus.COMPLETED.value:
@@ -66,7 +75,7 @@ def test_completed_baseline_can_pass_or_regress_a_release_check():
     assert passed.json()["status"] == "passed"
     assert passed.json()["comparisons"][0]["coverage_delta"] == 0.0
     assert regressed.json()["status"] == "regressed"
-    assert "exact_match pass rate fell" in " ".join(regressed.json()["reasons"])
+    assert "exact_match pass_rate fell" in " ".join(regressed.json()["reasons"])
 
 
 def test_release_check_is_inconclusive_when_current_run_is_unfinished():

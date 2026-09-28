@@ -69,7 +69,9 @@ class HttpAdapter:
         async with self.client() as client:
             body = await self.request(client, "POST", self.url,
                                       json={"schema_version": 1, "request_id": request_id,
-                                            "task": scenario.task, "inputs": scenario.inputs},
+                                            "task": scenario.task, "inputs": scenario.inputs,
+                                            **({"turns": [{"id": t.id, "input": t.input} for t in scenario.turns]}
+                                               if scenario.turns else {})},
                                       headers={"Idempotency-Key": request_id})
         evidence = Evidence.model_validate(body)
         evidence.latency_ms = (time.monotonic() - started) * 1000
@@ -92,6 +94,8 @@ class LegalRagAdapter(HttpAdapter):
         self.ready_value = ready_value
 
     async def execute(self, scenario, request_id):
+        if scenario.turns:
+            raise ExecutionFailure("Native legal adapter does not support multi-turn execution; use an instrumented bridge")
         started = time.monotonic()
         async with self.client() as client:
             response = await self.request(client, "POST", self.url + "/agent-review/start",

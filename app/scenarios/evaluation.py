@@ -3,22 +3,10 @@
 import math
 
 from app.scenarios.schemas import CheckResult, Evidence, Scenario, ScenarioResult
+from app.scenarios.assertions import assert_value, resolve_pointer
+from app.scenarios.trace import evaluate_trace
+from app.scenarios.revenue_ops import evaluate_revenue_ops
 
-
-def resolve_pointer(value, pointer):
-    if pointer == "":
-        return value
-    for token in pointer[1:].split("/"):
-        token = token.replace("~1", "/").replace("~0", "~")
-        if isinstance(value, list):
-            if not token.isdecimal() or (len(token) > 1 and token.startswith("0")):
-                raise KeyError(pointer)
-            value = value[int(token)]
-        elif isinstance(value, dict):
-            value = value[token]
-        else:
-            raise KeyError(pointer)
-    return value
 
 
 def evaluate(scenario: Scenario, evidence: Evidence) -> ScenarioResult:
@@ -28,26 +16,10 @@ def evaluate(scenario: Scenario, evidence: Evidence) -> ScenarioResult:
         checks.append(CheckResult(name=name, status=("unverified" if passed is None
                       else "passed" if passed else "failed"), explanation=explanation))
 
-    for assertion in scenario.assertions:
-        try:
-            actual = resolve_pointer(evidence.output, assertion.path)
-        except (KeyError, IndexError):
-            check(assertion.name, False, "Required output path is missing")
-            continue
-        try:
-            if assertion.operator == "exists":
-                passed = True
-            elif assertion.operator == "equals":
-                passed = type(actual) is type(assertion.value) and actual == assertion.value
-            elif assertion.operator == "contains":
-                passed = isinstance(actual, (str, list, dict)) and assertion.value in actual
-            else:
-                numeric = lambda x: isinstance(x, (int, float)) and not isinstance(x, bool)
-                passed = numeric(actual) and numeric(assertion.value) and (
-                    actual <= assertion.value if assertion.operator == "max" else actual >= assertion.value)
-            check(assertion.name, passed, "Output assertion " + ("satisfied" if passed else "not satisfied"))
-        except TypeError:
-            check(assertion.name, False, "Output has an incompatible type")
+    assert_value(scenario.assertions, evidence.output, check)
+    evaluate_trace(scenario, evidence, check)
+    if scenario.revenue_ops:
+        evaluate_revenue_ops(scenario.revenue_ops, evidence.revenue_ops, check)
 
     observed = evidence.tool_calls is not None and evidence.trace_complete
     calls = evidence.tool_calls or []
@@ -79,7 +51,7 @@ def evaluate(scenario: Scenario, evidence: Evidence) -> ScenarioResult:
             isinstance(t, dict) and isinstance(t.get("name"), str) and t.get("priority") in ("high", "medium", "low") for t in tasks
         ) and all(isinstance(i, dict) and isinstance(i.get("taskName"), str)
                   and isinstance(i.get("description"), str) and bool(i["description"].strip())
-                  and type(i.get("time")) in (int, float) and math.isfinite(i["time"]) and i["time"] > 0 for i in items)
+                  and type(i.get("time")) in (int, float) and 0 < i["time"] <= 1e308 and math.isfinite(i["time"]) for i in items)
         check("schedule_shape", shape, "Open SaaS tasks and taskItems must have valid fields and positive durations")
         if shape:
             names = [t["name"] for t in tasks]

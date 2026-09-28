@@ -14,6 +14,7 @@ from sqlalchemy.orm import selectinload
 from app.database.connection import get_db
 from app.database.models import EvaluationResultDB, EvaluationRunDB
 from app.errors import sanitize_error
+from app.services.result_integrity import is_valid_quality_score
 from app.runners.eval_runner import get_run_metrics
 from app.schemas.outcomes import EvaluationOutcome
 
@@ -41,16 +42,19 @@ def _safe_configuration(value: Any) -> Any:
 def _result_payload(result: EvaluationResultDB) -> dict[str, Any]:
     metadata = result.metadata_dict
     reason = metadata.get("reason")
+    invalid = result.outcome == "evaluated" and not is_valid_quality_score(result.score)
+    effective_outcome = "evaluation_error" if invalid else result.outcome
     return {
         "example_id": result.example_id,
         "evaluator": result.evaluator_name,
-        "outcome": result.outcome,
-        "score": result.score,
+        "outcome": effective_outcome,
+        "score": result.score if effective_outcome == "evaluated" else None,
         "prompt": result.prompt,
         "output": result.prediction,
         "expected_answer": result.expected_output,
         "judge_explanation": str(reason) if reason is not None else None,
-        "sanitized_error": sanitize_error(result.error_message) if result.error_message else None,
+        "sanitized_error": ("Stored quality score is invalid; excluded from quality metrics." if invalid else
+                            sanitize_error(result.error_message) if result.error_message else None),
     }
 
 
@@ -109,8 +113,10 @@ class ReportService:
             result for result in results if result["outcome"] == EvaluationOutcome.EVALUATION_ERROR.value
         ]
         failures = [*generation_errors, *evaluation_errors]
-        quality_failures = [r for r in results if r["outcome"] == "evaluated" and r["score"] is not None and r["score"] < .5]
         metrics = get_run_metrics(run_id)
+        thresholds = {name: metric.get("pass_threshold", .5) for name, metric in metrics.get("evaluators", {}).items()}
+        quality_failures = [r for r in results if r["outcome"] == "evaluated" and r["score"] is not None
+                            and r["score"] < thresholds.get(r["evaluator"], .5)]
         return {
             "report_type": "evaluation_summary",
             "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -227,7 +233,7 @@ th {{ background: #eaf1f8; }} pre {{ white-space: pre-wrap; margin: 0; font-fami
 <h2>Baseline Outcome</h2><div class="summary">{text((report.get('baseline_outcome') or {}).get('status'))}: {text(' '.join((report.get('baseline_outcome') or {}).get('reasons', [])))}</div>
 <h2>Example-level Failures</h2><table><thead><tr><th>Example</th><th>Evaluator</th><th>Outcome</th><th>Prompt</th><th>Output</th><th>Expected answer</th><th>Judge explanation</th><th>Sanitized error</th></tr></thead><tbody>{failure_rows}</tbody></table>
 <h2>Run Configuration</h2><p>Configuration verified: {text(run['configuration_verified'])}</p><pre class="meta">{configuration}</pre>
-<h2>Quality Failures (score below 0.5)</h2><table><thead><tr><th>Example</th><th>Evaluator</th><th>Score</th><th>Output</th><th>Explanation</th></tr></thead><tbody>{quality_rows or '<tr><td colspan="5">No verified low-scoring results.</td></tr>'}</tbody></table>
+<h2>Quality Failures (below the saved evaluator pass threshold)</h2><table><thead><tr><th>Example</th><th>Evaluator</th><th>Score</th><th>Output</th><th>Explanation</th></tr></thead><tbody>{quality_rows or '<tr><td colspan="5">No verified low-scoring results.</td></tr>'}</tbody></table>
 </body></html>"""
 
     @staticmethod

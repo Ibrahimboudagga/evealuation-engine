@@ -75,7 +75,7 @@ from app.api.schemas import (
     PairwiseComparisonItem,
 )
 from app.database.connection import get_db, init_db, database_is_reachable
-from app.database.models import DatasetDB, EvaluationRunDB, EvaluationResultDB, MembershipDB, PairwiseRunDB, ProjectAccessDB, ProjectDB
+from app.database.models import ScenarioSuiteDB, DatasetDB, EvaluationRunDB, EvaluationResultDB, MembershipDB, PairwiseRunDB, ProjectAccessDB, ProjectDB
 from app.errors import sanitize_error
 from app.evaluators.registry import EvaluatorRegistry
 from app.evaluators.pairwise_judge import PairwiseJudgeEvaluator
@@ -86,6 +86,7 @@ from app.runners.pairwise_runner import (
     get_pairwise_run_metrics,
     get_pairwise_comparisons,
 )
+from app.services.result_integrity import is_valid_quality_score
 from app.services.dataset_service import DatasetService
 from app.services.baseline_service import BaselineService
 from app.services.demo_seed import DemoSeedService
@@ -702,7 +703,7 @@ async def launch_evaluation_template(
         **template.settings,
         "dataset_id": req.dataset_id,
         "dataset_version_id": req.dataset_version_id,
-        "release_rules": {
+        "release_rules": template.settings.get("release_rules") or {
             "coverage_minimum": template.settings.get("coverage_minimum"),
             "exact_match_pass_rate_max_drop": template.settings.get("exact_match_pass_rate_max_drop"),
         },
@@ -1093,7 +1094,8 @@ async def create_run(req: RunRequest, context: Optional[AuthContext] = Depends(g
             },
             "judge_prompt_template": req.judge_prompt_template,
             "template_execution": {"timeout_seconds": req.timeout_seconds},
-            "release_rules": req.release_rules,
+            "release_rules": req.release_rules.model_dump() if req.release_rules else None,
+            "evaluator_settings": {name: value.model_dump() for name, value in req.evaluator_settings.items()},
             "report_preferences": req.report_preferences,
         },
     )
@@ -1171,6 +1173,7 @@ async def get_run(run_id: str, context: Optional[AuthContext] = Depends(get_auth
             EvaluatorMetric(
                 evaluator=name,
                 unverified_cases=data.get("unverified_cases", 0),
+                invalid_score_count=data.get("invalid_score_count", 0),
                 denominator_verified=data.get("denominator_verified", False),
                 backends=data.get("backends", []),
                 total_cases=data["total_cases"],
@@ -1179,6 +1182,7 @@ async def get_run(run_id: str, context: Optional[AuthContext] = Depends(get_auth
                 evaluation_errors=data["evaluation_errors"],
                 error_count=data["error_count"],
                 passing_evaluations=data["passing_evaluations"],
+                pass_threshold=data.get("pass_threshold", .5),
                 evaluation_coverage=data["evaluation_coverage"],
                 mean_score=data["avg_score"],
                 pass_rate=data["pass_rate"],
@@ -1305,16 +1309,19 @@ async def list_run_results(
         query = base_query
         if evaluator:
             query = query.filter(EvaluationResultDB.evaluator_name == evaluator)
-        if outcome:
-            query = query.filter(EvaluationResultDB.outcome.in_([item.value for item in outcome]))
-        if score_min is not None:
-            query = query.filter(EvaluationResultDB.score >= score_min)
-        if score_max is not None:
-            query = query.filter(EvaluationResultDB.score <= score_max)
         db_results = query.order_by(EvaluationResultDB.id).all()
 
         results = []
         for result in db_results:
+            invalid = result.outcome == "evaluated" and not is_valid_quality_score(result.score)
+            effective_outcome = "evaluation_error" if invalid else result.outcome
+            effective_score = result.score if effective_outcome == "evaluated" else None
+            if outcome and effective_outcome not in {item.value for item in outcome}:
+                continue
+            if score_min is not None and (effective_score is None or effective_score < score_min):
+                continue
+            if score_max is not None and (effective_score is None or effective_score > score_max):
+                continue
             metadata = result.metadata_dict
             reason = metadata.get("reason")
             results.append(
@@ -1322,13 +1329,14 @@ async def list_run_results(
                     id=result.id,
                     example_id=result.example_id,
                     evaluator_name=result.evaluator_name,
-                    outcome=EvaluationOutcome(result.outcome),
-                    score=result.score,
+                    outcome=EvaluationOutcome(effective_outcome),
+                    score=effective_score,
                     prompt=result.prompt,
                     prediction=result.prediction,
                     expected_output=result.expected_output,
                     judge_explanation=str(reason) if reason is not None else None,
-                    error_message=sanitize_error(result.error_message) if result.error_message else None,
+                    error_message=("Stored quality score is invalid; excluded from quality metrics." if invalid else
+                                   sanitize_error(result.error_message) if result.error_message else None),
                 )
             )
 
@@ -1443,6 +1451,9 @@ async def update_project(project_id: str, req: ProjectUpdateRequest, context: Op
 @app.delete("/projects/{project_id}", response_model=ProjectDeleteResponse)
 async def delete_project(project_id: str, context: Optional[AuthContext] = Depends(get_auth_context)):
     _require_project_access(project_id, context, write=True)
+    with get_db() as db:
+        if db.query(ScenarioSuiteDB.id).filter_by(project_id=project_id).first():
+            raise HTTPException(409, "Delete scenario runs and suite versions before deleting this project.")
     deleted = await asyncio.to_thread(_project_service.delete_project, project_id)
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
@@ -1884,3 +1895,8 @@ async def list_pairwise_runs(status: Optional[RunStatus] = Query(default=None), 
         ]
 
     return PairwiseRunsListResponse(runs=runs)
+
+
+# Scenario routes reuse the same workspace and project authorization boundary.
+from app.api.scenario_routes import register_scenario_routes
+register_scenario_routes(app, get_auth_context, _require_project_access)
