@@ -155,8 +155,9 @@ class ScheduleService:
                 "allow_unauthenticated": judge_connection.allow_unauthenticated,
             },
             "judge_prompt_template": settings.get("judge_prompt_template"),
+            "evaluator_settings": settings.get("evaluator_settings") or {},
             "template_execution": {"timeout_seconds": settings.get("timeout_seconds", 60.0)},
-            "release_rules": {
+            "release_rules": settings.get("release_rules") or {
                 "coverage_minimum": settings.get("coverage_minimum"),
                 "exact_match_pass_rate_max_drop": settings.get("exact_match_pass_rate_max_drop"),
             },
@@ -200,8 +201,15 @@ class ScheduleService:
         return result
 
     def _trigger_one(self, schedule_id: str, now: datetime) -> bool:
+        """Commit the queued run, occurrence, next time and audit as one unit.
+
+        PostgreSQL locks the schedule row. SQLite deployment still requires the
+        documented single application process and single schedule dispatcher.
+        """
         with get_db() as db:
-            schedule = db.query(EvaluationScheduleDB).filter(EvaluationScheduleDB.id == schedule_id).first()
+            schedule = db.query(EvaluationScheduleDB).filter(
+                EvaluationScheduleDB.id == schedule_id
+            ).with_for_update().first()
             if not schedule or not schedule.active or schedule.next_execution_at > now:
                 return True
             template = db.query(EvaluationTemplateDB).filter(
@@ -218,37 +226,31 @@ class ScheduleService:
                 "dataset_version_id": schedule.dataset_version_id,
                 "frequency": schedule.frequency,
             }
-            template_settings = template.settings if template else None
+            run_id: Optional[str] = None
+            error_message: Optional[str] = None
+            try:
+                if template is None:
+                    raise ValueError("Scheduled evaluation template was not found.")
+                self._usage.assert_run_capacity(
+                    schedule.workspace_id, schedule.dataset_id, schedule.dataset_version_id, 2,
+                )
+                runner = self._build_runner(
+                    SimpleNamespace(**schedule_data), SimpleNamespace(settings=template.settings),
+                )
+                # Flush a harmless schedule update before SAVEPOINT creation so
+                # SQLite opens a real outer transaction (legacy sqlite mode does
+                # not begin one for SELECT or SAVEPOINT alone).
+                schedule.updated_at = now
+                db.flush()
+                with db.begin_nested():
+                    created_id = runner.create_run(
+                        run_id=occurrence_id, dataset_id=schedule.dataset_id,
+                        dataset_version_id=schedule.dataset_version_id, db_session=db,
+                    )
+                run_id = created_id
+            except Exception as error:
+                error_message = sanitize_error(error)
 
-        run_id: Optional[str] = None
-        error_message: Optional[str] = None
-        try:
-            # Re-load via IDs inside the runner builder so encrypted credentials
-            # are resolved only for execution and never added to schedule records.
-            if template_settings is None:
-                raise ValueError("Scheduled evaluation template was not found.")
-            self._usage.assert_run_capacity(
-                schedule_data["workspace_id"],
-                schedule_data["dataset_id"],
-                schedule_data["dataset_version_id"],
-                2,
-            )
-            runner = self._build_runner(
-                SimpleNamespace(**schedule_data),
-                SimpleNamespace(settings=template_settings),
-            )
-            run_id = runner.create_run(
-                run_id=occurrence_id,
-                dataset_id=schedule_data["dataset_id"],
-                dataset_version_id=schedule_data["dataset_version_id"],
-            )
-        except Exception as error:
-            error_message = sanitize_error(error)
-
-        with get_db() as db:
-            schedule = db.query(EvaluationScheduleDB).filter(EvaluationScheduleDB.id == schedule_data["id"]).first()
-            if not schedule:
-                return False
             schedule.last_executed_at = now
             schedule.next_execution_at = self._next_after(scheduled_for, schedule.frequency, now)
             schedule.last_error = error_message
@@ -263,15 +265,13 @@ class ScheduleService:
                 error_message=error_message,
             )
             db.add(execution)
+            self._operations.record(
+                schedule.workspace_id,
+                "schedule.triggered" if run_id else "schedule.trigger_failed",
+                "evaluation_schedule", schedule.id,
+                metadata={"run_id": run_id, "scheduled_for": scheduled_for.isoformat(), "error": error_message},
+                db_session=db,
+            )
             db.commit()
-
-        action = "schedule.triggered" if run_id else "schedule.trigger_failed"
-        self._operations.record(
-            schedule_data["workspace_id"],
-            action,
-            "evaluation_schedule",
-            schedule_data["id"],
-            metadata={"run_id": run_id, "scheduled_for": scheduled_for.isoformat(), "error": error_message},
-        )
         return run_id is not None
 

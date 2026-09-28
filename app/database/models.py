@@ -542,3 +542,45 @@ class PairwiseComparisonDB(Base):
     @metadata_dict.setter
     def metadata_dict(self, val: Dict[str, Any]) -> None:
         self.metadata_json = json.dumps(val) if val is not None else None
+
+
+class ScenarioSuiteDB(Base):
+    """One immutable version of a project scenario dataset."""
+    __tablename__ = "scenario_suites"
+    __table_args__ = (UniqueConstraint("project_id", "name", "version", name="uq_scenario_suite_version"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(36), ForeignKey("workspaces.id"), nullable=False)
+    project_id: Mapped[str] = mapped_column(String(36), ForeignKey("projects.id"), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    content_json: Mapped[str] = mapped_column(Text, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class ScenarioRunDB(Base):
+    """Scoring of imported application evidence; no remote execution is implied."""
+    __tablename__ = "scenario_runs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(36), ForeignKey("workspaces.id"), nullable=False)
+    project_id: Mapped[str] = mapped_column(String(36), ForeignKey("projects.id"), nullable=False)
+    suite_id: Mapped[str] = mapped_column(String(36), ForeignKey("scenario_suites.id"), nullable=False)
+    target_build: Mapped[str] = mapped_column(String(255), nullable=False)
+    is_simulated: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    configuration_json: Mapped[str] = mapped_column(Text, nullable=False)
+    metrics_json: Mapped[str] = mapped_column(Text, nullable=False)
+    results_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    finished_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class ScenarioShareDB(Base):
+    __tablename__ = "scenario_shares"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(36), ForeignKey("workspaces.id"), nullable=False)
+    run_id: Mapped[str] = mapped_column(String(36), ForeignKey("scenario_runs.id"), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    html_snapshot: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)

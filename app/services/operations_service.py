@@ -5,9 +5,10 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
+from sqlalchemy.orm import Session
 
 from app.database.connection import get_db
-from app.database.models import AuditEventDB, ReportShareDB, WorkspaceDB
+from app.database.models import AuditEventDB, ReportShareDB, ScenarioShareDB, WorkspaceDB
 from app.services.identity_service import AuthContext
 
 
@@ -20,6 +21,7 @@ class OperationsService:
         self, workspace_id: str, action: str, entity_type: str, entity_id: Optional[str] = None,
         project_id: Optional[str] = None, context: Optional[AuthContext] = None,
         metadata: Optional[dict[str, Any]] = None,
+        db_session: Optional[Session] = None,
     ) -> None:
         event = AuditEventDB(
             id=str(uuid.uuid4()), workspace_id=workspace_id, action=action, entity_type=entity_type,
@@ -28,6 +30,9 @@ class OperationsService:
             actor_email=context.email if context else None, created_at=_now(),
         )
         event.metadata_dict = metadata
+        if db_session is not None:
+            db_session.add(event)
+            return
         with get_db() as db:
             db.add(event)
             db.commit()
@@ -64,6 +69,10 @@ class OperationsService:
             expired_shares = db.query(ReportShareDB).filter(
                 ReportShareDB.workspace_id == workspace_id,
                 ReportShareDB.expires_at < _now(),
+            ).delete(synchronize_session=False)
+            expired_shares += db.query(ScenarioShareDB).filter(
+                ScenarioShareDB.workspace_id == workspace_id,
+                ScenarioShareDB.expires_at < _now(),
             ).delete(synchronize_session=False)
             old_events = db.query(AuditEventDB).filter(
                 AuditEventDB.workspace_id == workspace_id,

@@ -1,5 +1,7 @@
 # Review analysis and stabilization changes
 
+> Follow-up: [28 September reanalysis remediation](REANALYSIS_REMEDIATION.md) records the newer changes and remaining limits. This file preserves the first stabilization review.
+
 This document responds to `evealuation_engine_deep_review.md` (26 September
 2026, reviewed revision `f995f67`). The review was treated as engineering
 feedback, not as proof that every assertion or proposed design was correct.

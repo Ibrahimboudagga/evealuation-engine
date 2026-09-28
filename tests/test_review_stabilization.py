@@ -82,7 +82,7 @@ def test_api_schema_forward_references_are_resolved():
     from app.api.schemas import AdminConsoleResponse
     assert 'health' in AdminConsoleResponse.model_json_schema()['properties']
     # The container uses eager annotation evaluation, unlike local Python 3.14.
-    source = Path('app/api/schemas.py').read_text()
+    source = Path('app/api/schemas.py').read_text(encoding='utf-8')
     assert 'from __future__ import annotations' in source or source.index('class HealthResponse') < source.index('class AdminConsoleResponse')
 
 
@@ -214,15 +214,17 @@ async def test_worker_heartbeat_continues_during_execution():
     started = asyncio.Event()
     calls = []
     worker._heartbeat = lambda claimed=None: calls.append(claimed.run_id if claimed else None)
-    async def long_iteration():
+    async def long_iteration(*, dispatch_schedules=True):
         worker._active_claim = ClaimedRun('evaluation_run', 'long-running', None, None, {})
         started.set()
         await asyncio.sleep(10)
     worker.run_once = long_iteration
     await worker.start()
-    await started.wait()
-    await asyncio.sleep(.04)
-    await worker.stop()
+    try:
+        await asyncio.wait_for(started.wait(), timeout=2)
+        await asyncio.sleep(.04)
+    finally:
+        await worker.stop()
     assert calls.count('long-running') >= 2
 
 

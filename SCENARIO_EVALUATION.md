@@ -1,11 +1,15 @@
 # Evaluating agents and application AI
 
-This extension evaluates an application's observable result and execution evidence.
-It is separate from the existing prompt-to-model evaluation runner. The first
-implementation is an operator CLI with JSONL results, a run manifest, and an HTML
-review report. It does not yet register scenario runs in the workspace database,
-Gradio, queue, schedules, billing, or public report sharing. Existing model and
-pairwise evaluation flows are unchanged.
+This extension evaluates observable application output and execution evidence.
+There are now two entry points: the operator CLI executes trusted targets or
+fixtures; the workspace API and Gradio page score uploaded application evidence.
+Workspace runs, immutable suite versions, reviews, comparisons, exports, and
+expiring report snapshots are persisted in the database.
+
+The workspace path **imports evidence**. It does not start a remote agent or
+verify the origin of an uploaded trace. Every response/report says so. Remote
+execution remains operator controlled; automatic retries and schedules still
+apply only to the model and pairwise runners.
 
 ## Try both reference suites without credentials
 
@@ -67,8 +71,10 @@ evaluated incorrect result receives `evaluated` and a failing quality score.
 Coverage = valid cases / all expected cases. Pass rate = passing valid cases /
 valid cases. Average score also uses only valid cases. If any expected case is
 missing or invalid, the overall decision is inconclusive; verified failures
-remain visible per case. These are scenario decisions, not the existing
-baseline/release-rule comparison service.
+remain visible per case. Scenario comparisons additionally check pinned suite/scorer identity, per-case
+simulation modes, coverage, minimum valid cases, and pass-rate thresholds.
+They use a separate scenario policy; text evaluator/slice policies are not
+silently applied to agent traces.
 
 ## Application HTTP adapter
 
@@ -104,8 +110,9 @@ response:
 Only `output` and `simulated` are required. Never invent traces or token counts:
 omit unavailable evidence or set it to null. `tool_calls=[]` plus
 `trace_complete=true` asserts that zero calls actually occurred. A partial trace
-must not be marked complete. Only observable tool names/statuses are needed;
-private chain-of-thought is neither required nor collected.
+must not be marked complete. Basic tool-name checks need names/statuses; argument/order/retrieval/state checks
+require their additional typed fields below. Private chain-of-thought is neither
+required nor collected.
 
 Use `--token-env TARGET_EVALUATION_TOKEN` to read a bearer credential from an
 environment variable. A missing explicitly requested credential is an error.
@@ -200,20 +207,104 @@ rest of the SaaS. Test those independently or expose explicit observed state
 assertions in a separate controlled integration suite. No Open SaaS production
 endpoint is called by the fixture demonstration.
 
-## Verification and next integration boundary
+## Typed agent evidence
 
-```powershell
-.\.venv\Scripts\python.exe -m pytest tests/test_scenarios.py -q
-```
+Additional optional fields extend the original version-1 envelope. Old fixtures
+remain valid; choosing a deeper check makes its evidence mandatory.
 
-Tests use local fixtures and `httpx.MockTransport`. They cover missing traces,
-forbidden tool attempts, token/call budgets, structured schedule failures,
-malformed responses, HTTP errors, deadlines, cancellation, partial report
-readiness, persisted results, and HTML escaping. No real target credentials are
-required. Live validation requires running reference deployments and controlled
-datasets, which are not supplied by this repository.
+| Scenario field | Required observed evidence | What is verified |
+| --- | --- | --- |
+| tool_expectations | tool_calls with arguments and result.value | JSON Pointer assertions on a named attempt; occurrence is ordered by sequence |
+| tool_order | complete tool_calls with unique sequence numbers | Successful attempts appear in the declared order |
+| retrieval | retrievals with source_id/query/rank and retrieval_complete | Recall against configured relevant IDs and count of other IDs |
+| grounding | observed source content and output claim | Exact configured claim and supporting quote; unreviewed references are inconclusive |
+| state_checks | state_before / state_after | Explicit state assertions |
+| side_effect_policy | complete side_effects with name/status/authorized | Allowed attempts, required successful effects, and observed authorization decisions |
+| turns | up to 20 turns with ID/sequence/output/state and turns_complete | Declared turn ordering, outputs, and state assertions |
+| revenue_ops | revenue_ops typed evidence | Hotel/date range, DAY x LT matrix, clustering inputs, selected cluster, anomaly labels, calculations, numeric narrative claims |
 
-The next integration step is database-backed scenario run/result types with
-workspace scoping, scenario dataset upload/review in Gradio, and explicit remote
-execution ownership/cancellation before connecting these runs to automatic
-queue retries and schedules. Keep the old text evaluation contract intact.
+A tool result uses {"value": null} for an observed null; a missing result means
+unavailable evidence. Tool attempt IDs/sequence and turn IDs/sequence must be
+unique. HTTP requests include declared turns as {id,input}; expected assertions
+are not sent to the target. The native legal adapter rejects multi-turn suites
+because its target interface has no supported conversation contract.
+
+Grounding is an exact evidence check, not a general entailment model. Source
+quotes and reviewed references still need trustworthy instrumentation. An
+application-provided authorized=true flag does not establish tenant isolation.
+A human_reviewed reference requires a reference_id, but the engine does not
+verify that the human review actually occurred.
+
+## Revenue Ops synthetic demonstration
+
+~~~powershell
+.\.venv\Scripts\python.exe run_scenarios.py --adapter fixture --dataset datasets/scenarios/revenue_ops.jsonl --fixtures datasets/scenarios/revenue_ops_fixtures.json --target-label revenue-ops-synthetic-v1 --output-dir scenario-output/revenue-demo
+~~~
+
+The fixture has synthetic truth. Change a report calculation, hotel, matrix,
+cluster or label to get a visible regression; remove required evidence to get
+an inconclusive result. It does not prove real anomaly detection quality,
+clustering suitability or general narrative truth.
+
+## Workspace workflow
+
+1. Sign in and create/select a client project.
+2. Open **Agent & App Scenarios**, refresh, and upload a JSONL suite. Reusing a
+   project and suite name creates a new immutable version.
+3. Refresh and select the version. Upload JSON keyed by scenario ID; each value
+   is an Evidence envelope. The shipped fixture JSON files use this shape.
+4. Enter the target build/commit and select **Evaluate imported evidence**.
+5. Refresh runs; review all cases or filter passed/regressed/inconclusive cases.
+6. Select a separate baseline. Compare, export HTML/JSON, or create a read-only
+   expiring share. A selected baseline decision is included in the report.
+7. Save the returned share ID to revoke that link later.
+
+Uploads are limited to 1,000 unique cases and 5 MB. Unknown evidence IDs are
+rejected; omitted or malformed cases are recorded as evaluation errors.
+Results/configuration/metrics and the completion audit event commit together.
+There is no queued/running imported-agent execution to resume: scoring is local
+and bounded, and remote side effects are never repeated by this import path.
+
+| API | Action |
+| --- | --- |
+| POST /scenario-suites | Create an immutable version from project_id, name, JSONL content |
+| GET /scenario-suites and /scenario-suites/{id} | List scoped versions or read a suite |
+| POST /scenario-runs | Score evidence with suite_id, target_build, evidence, optional release_rules |
+| GET /scenario-runs and /scenario-runs/{id} | List runs or review full evidence and checks |
+| GET /scenario-runs/{id}/compare?baseline_run_id=… | Compare compatible runs |
+| GET /scenario-runs/{id}/export?format=html | HTML or JSON; optional baseline_run_id |
+| POST /scenario-runs/{id}/shares | Create snapshot link with expires_in_hours and optional baseline_run_id |
+| DELETE /scenario-shares/{id} | Revoke a link |
+| DELETE /scenario-runs/{id} and /scenario-suites/{id} | Owner deletion; delete runs before their suite |
+
+All private routes use existing workspace membership and client project grants.
+Public links return only a fixed, escaped HTML snapshot; tokens are hashed at
+rest. Set PUBLIC_API_BASE in the UI environment to the externally reachable API
+origin when it differs from API_BASE. The share token is returned only at
+creation and is not recorded in audit metadata.
+
+Scenario runs/cases/storage/shares contribute to workspace usage and existing
+admission limits. Importing traces makes **zero engine provider calls**. These
+counters are still not a billable provider-attempt ledger or atomic reservations.
+
+Credentials must be removed at the source. Suites containing recognizable
+credential fields are rejected. Retained traces redact recognized credentials
+without changing whitespace; the configuration records whether redaction
+occurred, that scores used original observations, and whether retained evidence
+is replayable. Pattern matching cannot identify every possible secret.
+Owners can delete retained runs (including their shares) and unused suites.
+Project deletion is blocked while suites remain; historical scope is retained.
+Existing retention maintenance also deletes expired scenario shares.
+
+## Verification and remaining boundary
+
+~~~powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_scenarios.py tests/test_scenario_trace.py tests/test_scenario_redaction.py tests/test_workspace_scenarios.py -q --basetemp=.pytest_tmp/scenarios
+~~~
+
+Tests use local fixtures and httpx.MockTransport; no live target credentials.
+The three reference demonstrations validate the harness and explicit synthetic
+contracts. Real hosted browser isolation, reviewed domain ground truth, remote
+execution ownership/cancellation, and automatic scheduled agent execution still
+need deployment/integration work. See REANALYSIS_REMEDIATION.md for the complete
+implemented-versus-pending assessment.

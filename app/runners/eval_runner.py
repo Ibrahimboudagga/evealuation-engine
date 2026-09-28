@@ -4,6 +4,8 @@ import json
 import asyncio
 import time
 import structlog
+from contextlib import nullcontext
+from sqlalchemy.orm import Session
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -21,9 +23,10 @@ from app.services.run_configuration import (
     build_single_run_configuration,
     dataset_path_snapshot,
     dataset_version_snapshot,
+    assert_execution_contract,
 )
 from app.services.activation_service import ActivationService
-from app.services.result_integrity import expected_cases, authoritative_records
+from app.services.result_integrity import expected_cases, authoritative_records, is_valid_quality_score
 
 log = structlog.get_logger()
 
@@ -141,12 +144,14 @@ class EvaluationRunner:
         dataset_id: Optional[str] = None,
         dataset_version_id: Optional[str] = None,
         run_id: Optional[str] = None,
+        db_session: Optional[Session] = None,
     ) -> str:
-        """Persist a queued run before evaluation begins and return its stable ID."""
-        init_db()
+        """Persist a queued run, optionally participating in the caller's transaction."""
+        if db_session is None:
+            init_db()
         run_id = run_id or str(uuid.uuid4())
 
-        with get_db() as db:
+        with (nullcontext(db_session) if db_session is not None else get_db()) as db:
             existing_run = db.query(EvaluationRunDB).filter(EvaluationRunDB.id == run_id).first()
             if existing_run:
                 if existing_run.status not in {RunStatus.QUEUED.value, RunStatus.RUNNING.value}:
@@ -223,7 +228,10 @@ class EvaluationRunner:
                 )
 
             db.add(db_run)
-            db.commit()
+            if db_session is None:
+                db.commit()
+            else:
+                db.flush()
         return run_id
 
     async def _run_example(self, example: EvaluationExample, run_id: str) -> List[EvaluationResultDB]:
@@ -318,6 +326,10 @@ class EvaluationRunner:
                     db_results.append(db_res)
                     continue
                 
+                if res.outcome == EvaluationOutcome.EVALUATED and not is_valid_quality_score(res.score):
+                    res.outcome = EvaluationOutcome.EVALUATION_ERROR
+                    res.score = None
+                    res.error_message = "Evaluator returned an invalid quality score."
                 # Fill in example_id and extend metadata
                 res.example_id = example.id
                 meta = res.metadata or {}
@@ -403,6 +415,19 @@ class EvaluationRunner:
             The run ID string.
         """
         self._raise_if_cancelled(run_id)
+        with get_db() as db:
+            saved_run = db.get(EvaluationRunDB, run_id)
+            saved_configuration = saved_run.run_configuration if saved_run else None
+        effective = build_single_run_configuration(
+            dataset=(saved_configuration or {}).get("dataset", {}),
+            provider=self.provider, evaluators=self.registry.get_all(),
+            concurrency_limit=self.concurrency_limit,
+            execution_timeout_seconds=self.execution_timeout_seconds,
+            result_batch_size=self.result_batch_size,
+            is_simulated=self._is_simulated(),
+            requested_configuration=self.requested_configuration,
+        )
+        assert_execution_contract(saved_configuration, effective)
         if dataset_id is not None:
             # New mode: load from DB
             with get_db() as db:
@@ -524,7 +549,7 @@ class EvaluationRunner:
 
         return run_id
 
-def get_run_metrics(run_id: str) -> Dict[str, Any]:
+def get_run_metrics(run_id: str, *, slice_metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Computes aggregated performance metrics for a specific evaluation run.
     """
@@ -532,9 +557,21 @@ def get_run_metrics(run_id: str) -> Dict[str, Any]:
         results = db.query(EvaluationResultDB).filter(EvaluationResultDB.run_id == run_id).all()
         run = db.get(EvaluationRunDB, run_id)
         expected, verified = expected_cases(db, run, results)
-        configured_names = [e["name"] for e in (run.run_configuration or {}).get("evaluators", [])] if run else []
+        configuration = (run.run_configuration or {}) if run else {}
+        configured = {e["name"]: e for e in configuration.get("evaluators", [])}
+        configured_names = list(configured)
+        if slice_metadata is not None:
+            case_metadata = (configuration.get("dataset") or {}).get("case_metadata")
+            if case_metadata is None:
+                verified = False
+                expected = set()
+            else:
+                expected = {case_id for case_id in expected
+                            if all(case_metadata.get(case_id, {}).get(key) == value
+                                   for key, value in slice_metadata.items())}
+            results = [result for result in results if result.example_id in expected]
         
-    if not results and not expected:
+    if not results and not expected and slice_metadata is None:
         return {}
         
     total_cases = len(expected)
@@ -555,18 +592,21 @@ def get_run_metrics(run_id: str) -> Dict[str, Any]:
         valid_scores = [
             result.score
             for result in evaluator_results
-            if result.outcome == EvaluationOutcome.EVALUATED.value and result.score is not None
+            if result.outcome == EvaluationOutcome.EVALUATED.value and is_valid_quality_score(result.score)
         ]
         valid_count = len(valid_scores)
         generation_errors = sum(
             result.outcome == EvaluationOutcome.GENERATION_ERROR.value
             for result in evaluator_results
         )
-        evaluation_errors = sum(
+        invalid_score_count = sum(result.outcome == EvaluationOutcome.EVALUATED.value
+                                  and not is_valid_quality_score(result.score) for result in evaluator_results)
+        evaluation_errors = invalid_score_count + sum(
             result.outcome == EvaluationOutcome.EVALUATION_ERROR.value
             for result in evaluator_results
         )
-        pass_count = sum(1 for score in valid_scores if score >= 0.5)
+        pass_threshold = configured.get(eval_name, {}).get("settings", {}).get("pass_threshold", 0.5)
+        pass_count = sum(1 for score in valid_scores if score >= pass_threshold)
         metrics["evaluators"][eval_name] = {
             "total_cases": total_cases,
             "unverified_cases": duplicates,
@@ -576,8 +616,10 @@ def get_run_metrics(run_id: str) -> Dict[str, Any]:
             "valid_evaluations": valid_count,
             "generation_errors": generation_errors,
             "evaluation_errors": evaluation_errors,
+            "invalid_score_count": invalid_score_count,
             "error_count": generation_errors + evaluation_errors,
             "passing_evaluations": pass_count,
+            "pass_threshold": pass_threshold,
             "evaluation_coverage": valid_count / total_cases if total_cases else 0.0,
             "avg_score": sum(valid_scores) / valid_count if valid_count else None,
             "pass_rate": pass_count / valid_count if valid_count else None,

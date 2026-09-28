@@ -5,6 +5,7 @@ import json
 import tempfile
 from pathlib import Path
 import inspect
+from app.ui.scenario_tab import build_scenario_tab
 from app.ui.session import api_headers as _api_headers, bind_session
 
 API_BASE = os.getenv("API_BASE", "http://localhost:8000")
@@ -444,7 +445,7 @@ async def create_provider_connection(name, provider, model, api_key, base_url, a
         return {"error": str(error)}
 
 
-async def create_evaluation_template(name, candidate_connection, judge_connection, prompt, concurrency, timeout, coverage, max_drop):
+async def create_evaluation_template(name, candidate_connection, judge_connection, prompt, concurrency, timeout, coverage, max_drop, release_json="", settings_json=""):
     if not name or not candidate_connection or not judge_connection:
         return {"error": "Enter a name and select candidate and judge connections."}
     payload = {
@@ -455,6 +456,8 @@ async def create_evaluation_template(name, candidate_connection, judge_connectio
         "report_preferences": {},
     }
     try:
+        payload["release_rules"] = json.loads(release_json) if release_json and release_json.strip() else None
+        payload["evaluator_settings"] = json.loads(settings_json) if settings_json and settings_json.strip() else {}
         async with httpx.AsyncClient(timeout=15.0, headers=_api_headers()) as client:
             response = await client.post(f"{API_BASE}/evaluation-templates", json=payload)
             response.raise_for_status()
@@ -967,6 +970,10 @@ This owner-only page brings account operations into one place. The overview incl
                 template_timeout = gr.Slider(minimum=1, maximum=300, value=60, step=1, label="Timeout (seconds)")
                 template_coverage = gr.Number(label="Minimum Coverage", value=0.95, minimum=0, maximum=1)
                 template_max_drop = gr.Number(label="Maximum Pass-Rate Drop", value=0.05, minimum=0, maximum=1)
+                template_release_json = gr.Textbox(label="Advanced release policy JSON (optional)", lines=4,
+                    placeholder='{"minimum_valid_cases": 20, "evaluators": {"llm_judge": {"average_score_minimum": 0.8, "average_score_max_drop": 0.05}}}')
+                template_settings_json = gr.Textbox(label="Evaluator pass thresholds JSON (optional)", lines=2,
+                    placeholder='{"llm_judge": {"pass_threshold": 0.8}}')
                 template_save_button = gr.Button("Save Template", variant="primary")
             with gr.Column():
                 launch_template_choice = gr.Dropdown(label="Saved Template", choices=[])
@@ -977,7 +984,7 @@ This owner-only page brings account operations into one place. The overview incl
                 template_output = gr.JSON(label="Template Result")
         template_save_button.click(
             fn=create_evaluation_template,
-            inputs=[template_name, template_candidate_connection, template_judge_connection, template_prompt, template_concurrency, template_timeout, template_coverage, template_max_drop, user_session],
+            inputs=[template_name, template_candidate_connection, template_judge_connection, template_prompt, template_concurrency, template_timeout, template_coverage, template_max_drop, template_release_json, template_settings_json, user_session],
             outputs=template_output,
         ).then(fn=template_choice_update, outputs=launch_template_choice, inputs=[user_session])
         refresh_templates_button.click(fn=template_choice_update, outputs=launch_template_choice, inputs=[user_session])
@@ -989,6 +996,8 @@ This owner-only page brings account operations into one place. The overview incl
             inputs=[launch_template_choice, launch_template_dataset, launch_template_version, user_session],
             outputs=template_output,
         )
+
+    build_scenario_tab(user_session, API_BASE)
 
     with gr.Tab("Projects"):
         gr.Markdown("Create a workspace for each client product before uploading its evaluation datasets. Seed the mock-only demo to start a credential-free walkthrough.")

@@ -10,6 +10,7 @@ from typing import Mapping, Optional
 from app.database.connection import get_db
 from app.database.models import (
     DatasetVersionDB,
+    ScenarioSuiteDB, ScenarioRunDB, ScenarioShareDB,
     EvaluationResultDB,
     EvaluationRunDB,
     PairwiseComparisonDB,
@@ -97,8 +98,21 @@ class UsageService:
             storage = sum(_bytes(version.content) for version in db.query(DatasetVersionDB).join(DatasetVersionDB.dataset).join(ProjectDB).filter(ProjectDB.workspace_id == workspace_id).all())
             storage += sum(_bytes(item.prompt) + _bytes(item.prediction) + _bytes(item.expected_output) + _bytes(item.error_message) + _bytes(item.metadata_json) for item in results)
             storage += sum(_bytes(item.prompt) + _bytes(item.response_a) + _bytes(item.response_b) + _bytes(item.expected_output) + _bytes(item.judge_reason) + _bytes(item.error_message) + _bytes(item.metadata_json) for item in comparisons)
+            scenario_runs = db.query(ScenarioRunDB).filter(
+                ScenarioRunDB.workspace_id == workspace_id, ScenarioRunDB.created_at >= start,
+                ScenarioRunDB.created_at < end).all()
+            evaluated_cases += sum(json.loads(run.metrics_json)["valid_evaluations"] for run in scenario_runs)
+            all_scenario_runs = db.query(ScenarioRunDB).filter_by(workspace_id=workspace_id).all()
+            storage += sum(_bytes(run.results_json) + _bytes(run.configuration_json) + _bytes(run.metrics_json)
+                           for run in all_scenario_runs)
+            storage += sum(_bytes(suite.content_json) for suite in
+                           db.query(ScenarioSuiteDB).filter_by(workspace_id=workspace_id).all())
+            storage += sum(_bytes(share.html_snapshot) for share in
+                           db.query(ScenarioShareDB).filter_by(workspace_id=workspace_id).all())
+            scenario_shares = db.query(ScenarioShareDB).filter(ScenarioShareDB.workspace_id == workspace_id,
+                ScenarioShareDB.created_at >= start, ScenarioShareDB.created_at < end).count()
             shares = db.query(ReportShareDB).filter(ReportShareDB.workspace_id == workspace_id, ReportShareDB.created_at >= start, ReportShareDB.created_at < end).count()
-            return {"runs": len(eval_runs) + len(pairwise_runs), "evaluated_cases": evaluated_cases, "provider_calls": single_requests + single_judges + pairwise_requests + pairwise_judges, "storage_bytes": storage, "report_shares": shares, "active_projects": active_projects}
+            return {"runs": len(eval_runs) + len(pairwise_runs) + len(scenario_runs), "evaluated_cases": evaluated_cases, "provider_calls": single_requests + single_judges + pairwise_requests + pairwise_judges, "storage_bytes": storage, "report_shares": shares + scenario_shares, "active_projects": active_projects}
 
     def overview(self, workspace_id: str, now: Optional[datetime] = None) -> dict:
         start, end = _period_bounds(now)
