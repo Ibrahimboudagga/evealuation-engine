@@ -20,6 +20,7 @@ The repository currently targets controlled agency pilots. It includes a FastAPI
 - [Metrics, failures, and release decisions](#metrics-failures-and-release-decisions)
 - [Providers and credentials](#providers-and-credentials)
 - [API, CLI, and UI](#api-cli-and-ui)
+- [CI/CD](#cicd)
 - [Deployment](#deployment)
 - [Testing](#testing)
 - [Project map](#project-map)
@@ -236,6 +237,12 @@ Authenticated API calls use `Authorization: Bearer <session token>` and the sele
 
 The Gradio UI covers initial setup, individual sign-in, account administration, provider connections, templates, projects, schedules, usage, datasets, model runs, pairwise runs, agent/application scenarios, detailed review, reports, dashboards, and release checks.
 
+## CI/CD
+
+GitHub Actions validates pull requests with the full Python 3.11/3.12/3.14 test matrix, a PostgreSQL 16 migration and backup/restore rehearsal, and a startup probe of the production Compose stack. After those gates pass, pushes to `main` and `v*` tags build and smoke-test an exact container digest before promoting it with an SBOM, build provenance, and an artifact attestation in GitHub Container Registry. Pull requests have read-only permissions and cannot publish packages.
+
+See [CI_CD.md](CI_CD.md) for image tags, release steps, branch protection, required GitHub settings, and the contract for adding a hosting-specific deployment stage.
+
 ## Deployment
 
 The included Compose stack runs PostgreSQL 16, the API, and Gradio on loopback interfaces.
@@ -307,6 +314,7 @@ tests/          Unit, integration, migration, security, and workflow tests
 | [HOSTED_PILOT_ONBOARDING.md](HOSTED_PILOT_ONBOARDING.md) | Hosted pilot setup checklist |
 | [PILOT_REHEARSAL.md](PILOT_REHEARSAL.md) | End-to-end operational rehearsal |
 | [TESTING.md](TESTING.md) | Test environment and recorded dependency versions |
+| [CI_CD.md](CI_CD.md) | Pipeline stages, image publication, and release operations |
 | [REANALYSIS_REMEDIATION.md](REANALYSIS_REMEDIATION.md) | Latest feedback response, verification evidence, and remaining gaps |
 
 ## Current boundaries
