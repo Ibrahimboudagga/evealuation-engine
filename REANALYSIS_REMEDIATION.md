@@ -1,175 +1,132 @@
-# Reanalysis response: measurement and agent evidence
+# Reanalysis response: controlled-pilot hardening
 
-Feedback: evealuation_engine_reanalysis_2026-09-28.md, reviewing f46bf46.
-Implemented on feature/reanalysis-measurement-evidence, based on the merged
-stabilization change. Last verified locally: 29 September 2026 (Africa/Tunis).
+Feedback reviewed: `evealuation_engine_reanalysis_2026-09-29.md`, covering
+revision `c5d6a6c`. Implemented on `feature/reanalysis-pilot-hardening`.
+Last verified locally: 3 October 2026 (Africa/Tunis).
 
 ## Assessment
 
-The feedback correctly distinguishes a compatible experiment from a trustworthy
-quality measurement. Two open-ended answers can both have zero exact matches
-while one is materially worse. That false-pass behavior was reproduced before
-the release-check changes. The separate CLI scenario workflow and schedule
-dispatch delay were also confirmed.
+The feedback is accurate about the product's position: the repository is a
+credible controlled-pilot foundation, not a general multi-tenant SaaS or an
+independent evaluation authority. The document was treated as review evidence,
+not as authorization to choose legal terms, buy infrastructure, certify
+security, or claim scientific validity.
 
-The review is engineering input, not an instruction to certify readiness or
-choose distribution terms. This change closes concrete measurement, evidence,
-workflow and scheduling gaps. It does not implement every commercial or
-research recommendation in the review.
+This change addresses concrete Phase 0 defects that can be enforced and tested
+inside the repository. Larger research, identity-provider, billing-ledger,
+distributed-worker, and hosted-infrastructure programs remain explicit work.
 
-## Implemented changes
+## Implemented in this remediation
 
-| Feedback / reproduced issue | Change | Evidence and limits |
+| Confirmed finding | Implemented behavior | Evidence and limit |
 | --- | --- | --- |
-| Literal evaluator version 1 could conceal code changes | Configuration schema 2 stores evaluator/base-class source hashes, dependency versions, rubric, explicit pass threshold, judge implementation/model/settings, and unverified calibration status | Legacy contracts compare as inconclusive. Candidate identity remains outside the comparison fingerprint so different candidate builds can be compared |
-| A queued run could execute changed code under its original snapshot | Both runners validate their effective candidate/judge/evaluator/execution contract before provider calls | Drift or legacy queued configurations fail clearly and require a fresh submission; no history is rewritten |
-| Exact match was the only quality regression gate | Average-score/pass-rate floors and maximum drops for named evaluators; minimum valid cases; metadata slice rules; saved policies propagated through direct, template and scheduled launch | Missing metrics, incompatible backends and insufficient samples remain inconclusive. Default policy protects all recorded evaluators |
-| Pass threshold was implicit and reports could disagree | Per-evaluator pass thresholds are saved and used in metrics, API and report quality-failure lists | Default threshold remains 0.5; configured thresholds take precedence |
-| Invalid scores could contaminate quality / release decisions | Strict normalized score validation; historical invalid scores treated as visible evaluation errors; pairwise invalid results excluded from winners and Elo | Null/non-finite/out-of-range scores cannot be ordinary wins or successful quality measurements |
-| Agent evidence only captured tool names | Typed argument/result/sequence, retrieval, reference-grounding, state, side-effect and bounded multi-turn contracts | Missing required observations yield unverified checks and null quality scores; observed authorization is not independent security proof |
-| Revenue Ops lacked a domain contract | Hotel/date range, DAY x LT, clustering inputs, chosen cluster, reference anomaly labels, numeric report/narrative calculations | Included fixture is synthetic; no real hotel, customer system, reviewed anomaly data or semantic narrative evaluator was supplied |
-| Scenario artifacts could not be managed in the product | Immutable project-scoped suite versions, persisted imported-evidence runs, API and Gradio review/filter/compare/export/share/revoke | This is evidence import and scoring, not remote worker-owned agent execution |
-| Client report scope and consistency | Existing project grants protect private routes; hashes protect expiring share tokens; fixed escaped HTML snapshots can include a selected baseline comparison | Uploaded provenance is explicitly unverified; report links never authorize other APIs |
-| Trace retention could alter scored text or expose obvious keys | Preserve whitespace, mask recognizable credential fields/text, reject credential-bearing suites, record redaction/replayability | Scores use original observations. Secret pattern matching is not complete data-loss prevention |
-| Long runs delayed schedules | Independent schedule dispatcher alongside the single execution worker | Still one application process / execution worker; multi-worker leases remain necessary |
-| Schedule occurrence/run/audit could commit separately | One transaction with a savepoint for run creation; deterministic occurrence identity retained | Tested rollback on audit failure; true deployment crash/load validation remains pending |
-| Worker health could conceal failure or shutdown could hang | Dead heartbeat/dispatcher detection; cancellation drains the dispatch transaction even if it fails | Focused asynchronous tests verify these paths |
-| Deployment evidence lacked restore proof | Smoke requires two explicit empty disposable databases; tests migrations, execution, backup, restore, row counts and content hashes | SQLite passed locally; PostgreSQL CI extended but not observed on this branch |
+| A workspace could lose its final owner | Owner memberships are locked for role/removal decisions; demoting, removing, or overwriting the last owner is rejected | PostgreSQL row locks serialize competing owner mutations; SQLite remains for single-process development |
+| Password sign-in had no abuse control | Failed sign-ins use one atomically updated, persistent HMAC-keyed throttle bucket for known and unknown emails; lockout survives process restart and success clears prior failures | Production requires a non-placeholder `AUTH_THROTTLE_SECRET`; invitations, recovery, MFA and SSO remain open |
+| Editors and comparison callers could shop release thresholds | Projects now store immutable model/scenario policy revisions. Editors may draft; owners approve. Runs bind to the latest approved revision ID and SHA-256 at submission. Query-time overrides return 422 | Existing embedded rules remain usable for local/unmanaged analysis; legacy project runs without approved binding are officially inconclusive |
+| Baseline governance was weak | Marking a workspace baseline is owner-only. Official comparison loads rules from the bound approved database revision and verifies its hash/config snapshot | Pairwise evaluation still lacks this full baseline policy flow |
+| Imported scenario evidence could report an official pass | Scenario API payloads, UI labels, exports, shares and comparisons expose analytical `quality_decision` separately; official `decision` remains `inconclusive` while provenance is unverified | Trusted signed capture/collector is not implemented |
+| Retention removed only links and audit rows | Retention can be explicitly enabled for terminal model/pairwise runs, results, retry archives, scenario evidence/suites and unreferenced inactive versions. A legal hold freezes shares, audit evidence and customer content, and omitted PUT fields preserve existing safeguards | Active versions, workspace templates, CLI artifacts and external backups remain operator-managed |
+| Project deletion left orphaned customer records | Owners get a non-mutating deletion preview and a legal-hold-aware, exact-name-confirmed project customer-data purge. Deletion and its content-free audit receipt commit atomically | Workspace-scoped templates are not project-linked and are excluded rather than falsely claimed as deleted |
+| Notification settings claimed delivery | Status now says `preferences_saved_delivery_unavailable` until a real outbox/adapter exists | No email or Slack delivery is claimed |
+| CI had no security gates | A separate least-privilege workflow adds CodeQL, `pip-audit`, full-history Gitleaks, Trivy source/misconfiguration scanning and built-image scanning, with a stable `Security gate` | Local YAML/Gitleaks checks passed; remote Actions and Docker/Trivy execution still require observation |
 
-Migration 20260928_18 adds scenario_suites, scenario_runs, and scenario_shares.
-It does not transform, remove or relabel historical model/pairwise records.
-Existing migration regression tests, including historical-record preservation,
-continue to pass.
+Migration `20260929_19` creates persistent throttle and policy-revision tables,
+adds nullable policy links to model/scenario runs, and adds workspace retention
+and legal-hold state. Historical records remain unchanged and policy links stay
+null; the migration does not invent approval evidence for old runs.
 
-## Using evaluator and slice policies
+## Governed release workflow
 
-Save these fields in a template or POST /runs:
+1. An owner or editor creates a policy draft under a client project.
+2. A workspace owner approves that immutable revision.
+3. A future model or scheduled run resolves the latest approved revision and
+   stores its ID, version and SHA-256 in the run configuration and foreign key.
+   Manual retry descendants preserve that binding.
+4. An owner selects a completed baseline.
+5. Comparison uses the bound policy. API/UI callers cannot supply replacement
+   thresholds after seeing results.
 
-~~~json
-{
-  "evaluator_settings": {
-    "llm_judge": {"pass_threshold": 0.8}
-  },
-  "release_rules": {
-    "coverage_minimum": 0.95,
-    "minimum_valid_cases": 20,
-    "evaluators": {
-      "llm_judge": {
-        "average_score_minimum": 0.8,
-        "average_score_max_drop": 0.05,
-        "pass_rate_max_drop": 0.05
-      }
-    },
-    "slices": [
-      {
-        "name": "critical_cases",
-        "metadata": {"risk": "critical"},
-        "minimum_valid_cases": 5,
-        "evaluators": {"llm_judge": {"pass_rate_minimum": 0.95}}
-      }
-    ]
-  }
-}
-~~~
+Main endpoints:
 
-Metadata values come from the pinned dataset case manifest. Sample minima are
-explicit admission rules; they are not confidence intervals or a calibration
-study. Score/pass-rate drops are absolute differences on a 0–1 scale: 0.05 means
-five percentage points. The Gradio template form accepts advanced policy and
-threshold JSON. Query overrides of legacy coverage/exact-match settings remain
-visible in the returned effective policy.
+```text
+POST /projects/{project_id}/release-policy-revisions
+GET  /projects/{project_id}/release-policy-revisions
+POST /projects/{project_id}/release-policy-revisions/{revision_id}/approve
+PUT  /runs/{run_id}/baseline
+GET  /runs/{run_id}/comparison?baseline_run_id=...
+```
 
-A legacy run cannot acquire a verified code contract retroactively. Establish a
-fresh baseline on the pinned suite. Model IDs and source hashes do not pin hosted
-provider aliases or downloaded embedding weights; those artifacts still require
-operator-controlled revision pinning for strict reproducibility.
+Model rules use the existing evaluator/slice `ReleaseRules` contract. Scenario
+rules cover coverage, minimum valid cases, pass-rate floor, and maximum drop.
+Approval creates audit events containing revision/version/hash metadata without
+copying the policy body into the audit trail.
 
-## Agency scenario workflow
+## Retention and deletion workflow
 
-See [SCENARIO_EVALUATION.md](SCENARIO_EVALUATION.md) for schemas, routes,
-fixtures and the Gradio walkthrough.
+Retention is safe by default: customer-content retention is disabled until an
+owner explicitly enables it. With no legal hold, applying retention removes
+expired shares and old audit events. When content retention is enabled, it also
+removes old terminal run/result evidence and retry archives, old imported
+scenario evidence, empty old scenario suites, and inactive dataset versions no
+longer referenced by runs or schedules. An active legal hold freezes every one
+of those deletion categories.
 
-Scenario scoring commits results, configuration, metrics and audit together.
-Private routes require authenticated project access. Limits include scenario
-runs/cases/storage/shares; imported traces make zero engine provider calls.
-The operator CLI still writes incrementally and bounds target execution.
-Remote retries, scheduling, ownership and cancellation are intentionally not
-claimed for imported scenario runs.
+For client offboarding, an owner can preview and then confirm a project purge:
 
-Suite and result deletion are owner actions. Deleting a run also removes its
-share snapshots. Suites with retained runs cannot be deleted; projects with
-suites cannot be deleted. Existing retention maintenance removes expired
-scenario shares. This does not constitute complete retention across all older
-datasets, CLI artifacts, downloads and retry archives.
+```text
+GET    /projects/{project_id}/customer-data/deletion-preview
+DELETE /projects/{project_id}/customer-data
+       {"confirm_project_name":"exact project name"}
+```
+
+The purge deletes project grants, report snapshots, schedules/history, model and
+pairwise results/runs, retry archives, scenario evidence/suites, dataset
+versions/datasets, and policy revisions in one transaction. The resulting
+content-free count receipt is written in that same transaction. A legal hold
+returns 409.
 
 ## Verification
 
 Runtime: Python 3.14.6 in the existing project virtual environment.
 
-- Full suite after the main implementation: **257 passed**, five existing
-  FastAPI/Starlette deprecation warnings, 88.50 seconds.
-- Final focused suite after adding selected-baseline sharing and two additional
-  integration tests: **68 passed**, the same warnings, 22.00 seconds. It covers
-  measurement contracts, API template propagation, scenario import/review/
-  sharing/deletion/isolation, typed trace checks and redaction.
-- Fresh SQLite smoke at schema 20260928_18: API/OpenAPI import, migrations,
-  long-path dataset UUID, mock execution/coverage, backup, restore, row counts,
-  content hashes and restored-run read **passed**.
-- Revenue Ops fixture CLI: **completed, simulated=true**, one valid case,
-  coverage 100%, explicit checks passed.
-- Final upload/redaction checks: **13 passed** after enforcing the UTF-8 byte limit.
-- Gradio UI import and Git diff whitespace check passed.
+- Focused regression suite covering identity, retention, policy governance,
+  migrations, scenarios, queues, and prior stabilization: **52 passed**.
+- Full suite: **268 passed**, with five existing FastAPI/Starlette deprecation
+  warnings, in 55.63 seconds.
+- `pip check`: **No broken requirements found**.
+- Alembic local database: **`20260929_19 (head)`**.
+- Fresh, copied-legacy, and populated rev18 migration tests cover the new
+  tables/columns, preserve historical records, confirm old policy links remain
+  null, and exercise SQLite with foreign-key enforcement enabled.
+- Python compilation and `git diff --check`: passed.
+- Security workflow YAML and pinned-action structure were validated locally.
+  Docker Desktop was stopped, so current local Gitleaks/Trivy/container
+  execution is not claimed; the remote workflow remains to be observed.
 
-Local logs and disposable databases are under ignored .pytest_tmp; CLI demo
-artifacts are under ignored scenario-output/reanalysis-revenue-final.
-No production database was used for the rehearsal.
+## Remaining work, in priority order
 
-CI now covers Python 3.11/3.12/3.14, PostgreSQL 16 with an encoded password, and a
-second disposable restore database. It publishes restore evidence and resolved
-dependencies. These jobs have not been observed remotely for this branch.
-The available Docker client could not contact its daemon; no live container,
-PostgreSQL server, real provider, target application, two-browser or proxy
-verification is claimed.
+1. **Identity lifecycle:** expiring invitations, verified password recovery,
+   MFA/external identity, scoped service accounts, and database-enforced tenant
+   policies.
+2. **Scientific validity:** human labels and adjudication, judge-human
+   agreement, repeated-judge/order-robustness studies, prompt-injection test
+   sets, confidence intervals, and minimum-sample policies.
+3. **Trusted scenario capture:** signed or mTLS-bound evidence, sequence and
+   completeness verification, egress controls, remote status/cancellation, and
+   immutable raw evidence.
+4. **Billing-grade usage:** immutable provider-attempt/token/cost ledger plus
+   transactional quota reservation/reconciliation under concurrency.
+5. **Distributed operations:** leased/fenced claims, separate workers,
+   horizontal-safe restart recovery, notification outbox/delivery, real staging
+   deployment and rollback rehearsal.
+6. **Reproducible supply chain:** reviewed hashed dependency locks, digest-pinned
+   base/service images, multi-architecture builds, and pinned embedding/model
+   artifacts. Security scanning reduces risk but does not make mutable inputs
+   reproducible.
+7. **Commercial decisions:** repository license, client terms, privacy/DPA,
+   support/SLA, vulnerability disclosure, data residency and subprocessors.
+   These require owner/counsel decisions and were not invented by this change.
 
-To repeat the SQLite deployment rehearsal, use two new paths:
-
-~~~powershell
-$env:DATABASE_URL = 'sqlite:///scenario-output/fresh-smoke.db'
-$env:RESTORE_DATABASE_URL = 'sqlite:///scenario-output/fresh-restore.db'
-$env:SMOKE_EVIDENCE_PATH = 'scenario-output/deployment-evidence.json'
-.\.venv\Scripts\python.exe -m scripts.deployment_smoke
-~~~
-
-Create the output directory first. The command refuses nonempty source/restore
-databases. PostgreSQL also needs matching pg_dump/pg_restore clients and two
-empty databases; URLs must encode password special characters. Credentials are
-passed to backup clients in their environment rather than command arguments.
-
-## Remaining work, in recommended order
-
-1. **Deployment acceptance:** observe the CI results; run the actual containers,
-   two isolated browser users and intended proxy; verify downloads/logout and
-   secret handling; pin a tested platform-specific dependency lock. A SQLite
-   restore test is not PostgreSQL operational acceptance.
-2. **Measurement validity:** commission human review of golden cases and slices;
-   record calibration/adjudication, repeated judgments and uncertainty; pin
-   judge/model weight revisions. The shipped regression fixtures are synthetic.
-3. **Remote agent execution:** add trusted workspace target connections, trace
-   provenance, remote ownership/idempotency/cancellation and safe scheduling.
-   Text and scenario policies are explicit but separate; there is no universal
-   release-policy or billing engine for all execution paths yet.
-4. **Paid usage:** atomic cross-path quota reservations, durable provider-attempt
-   ledger (including retry attempts), unknown-cost reporting and pricing.
-   Current aggregate usage/admission remains insufficient for reliable billing.
-5. **Identity and content lifecycle:** accepted invitations, verified recovery,
-   scoped automation credentials, and retention/deletion covering every content
-   and archive class. This change does not replace those remaining designs.
-6. **Commercial decisions:** the repository owner still needs to select
-   distribution/licensing terms and review client-data agreements. No license
-   was invented or added on the owner's behalf.
-
-The controlled-pilot demonstration is now executable with synthetic inputs:
-a pinned suite, comparable baseline, deliberately regressed evidence, corrected
-evidence, a visible decision and a fixed report. Tests also preserve prior retry
-and interruption behavior. Real staging-system and human-reviewed business
-validation remain the next proof points.
+The correct current claim is a controlled agency pilot with stronger release
+governance and operational safeguards. Production SaaS readiness still depends
+on the remaining evidence and infrastructure work above.

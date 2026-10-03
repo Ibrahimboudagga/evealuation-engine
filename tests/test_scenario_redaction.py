@@ -49,7 +49,8 @@ def test_retained_redaction_is_explicit_and_scoring_uses_original_observations()
                                                    "simulated": True}}})
         assert result.status_code == 201, result.text
         data = result.json()
-        assert data["metrics"]["decision"] == "passed"
+        assert data["metrics"]["decision"] == "inconclusive"
+        assert data["metrics"]["quality_decision"] == "passed"
         assert data["results"][0]["evidence"]["output"]["code"] == original
         assert data["results"][0]["evidence"]["output"]["apiKey"] == "[REDACTED]"
         assert data["configuration"]["redaction"]["applied"] is True

@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///evals.db"
     app_environment: str = "development"
     bootstrap_secret: Optional[str] = None
+    auth_throttle_secret: Optional[str] = None
+    auth_max_failed_attempts: int = 5
+    auth_failure_window_seconds: int = 900
+    auth_lockout_seconds: int = 900
     backup_guidance_url: str = "https://www.postgresql.org/docs/current/backup.html"
 
     # LLM provider API keys
@@ -82,8 +86,23 @@ def deployment_health() -> dict[str, Any]:
             Fernet(settings.workspace_encryption_key.encode())
         except (ValueError, TypeError):
             issues.append("WORKSPACE_ENCRYPTION_KEY is not a valid Fernet key.")
+    def placeholder(value: Optional[str]) -> bool:
+        normalized = (value or "").strip().lower()
+        return any(marker in normalized for marker in (
+            "replace-with", "change-me", "changeme", "example-secret", "placeholder"
+        ))
+
     if settings.app_environment.lower() == "production" and not settings.bootstrap_secret:
         issues.append("BOOTSTRAP_SECRET is required for production setup.")
+    elif settings.app_environment.lower() == "production" and placeholder(settings.bootstrap_secret):
+        issues.append("BOOTSTRAP_SECRET must not use a documented placeholder value.")
+    if settings.app_environment.lower() == "production" and (
+        not settings.auth_throttle_secret or len(settings.auth_throttle_secret) < 32
+        or placeholder(settings.auth_throttle_secret)
+    ):
+        issues.append(
+            "AUTH_THROTTLE_SECRET must contain at least 32 independently generated characters in production."
+        )
     if settings.app_environment.lower() == "production" and settings.database_url.startswith("sqlite"):
         issues.append("Production deployments require a managed PostgreSQL DATABASE_URL; SQLite is only for local development.")
     return {

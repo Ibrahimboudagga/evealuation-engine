@@ -182,6 +182,16 @@ def test_gradio_callbacks_receive_server_side_session_state(monkeypatch):
             assert ui.user_session in fn.inputs, fn.fn.__name__
 
 
+def test_gradio_release_policy_path_ids_require_uuids():
+    import app.ui.gradio_app as ui
+
+    assert ui._canonical_uuid(
+        "12345678-1234-5678-1234-567812345678", "Project ID"
+    ) == "12345678-1234-5678-1234-567812345678"
+    with pytest.raises(ValueError, match="Project ID must be a valid identifier"):
+        ui._canonical_uuid("../../health", "Project ID")
+
+
 def test_csv_formula_cells_are_neutralized():
     import csv, io
     from app.services.report_service import ReportService

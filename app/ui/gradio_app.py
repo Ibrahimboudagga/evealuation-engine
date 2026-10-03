@@ -3,6 +3,7 @@ import httpx
 import os
 import json
 import tempfile
+from uuid import UUID
 from pathlib import Path
 import inspect
 from app.ui.scenario_tab import build_scenario_tab
@@ -11,6 +12,14 @@ from app.ui.session import api_headers as _api_headers, bind_session
 API_BASE = os.getenv("API_BASE", "http://localhost:8000")
 
 PROVIDER_CHOICES = ["openai", "anthropic", "cohere", "gemini", "mock"]
+
+
+def _canonical_uuid(value, label):
+    """Validate untrusted UI identifiers before placing them in API paths."""
+    try:
+        return str(UUID(str(value).strip()))
+    except (AttributeError, TypeError, ValueError):
+        raise ValueError(f"{label} must be a valid identifier.") from None
 
 
 async def submit_run(
@@ -276,14 +285,10 @@ async def mark_run_as_baseline(run_id):
         return {"error": str(error)}
 
 
-async def compare_run_with_baseline(run_id, baseline_run_id, coverage_minimum, max_pass_rate_drop):
+async def compare_run_with_baseline(run_id, baseline_run_id):
     if not run_id or not run_id.strip() or not baseline_run_id:
         return "Enter a current Run ID and select a baseline.", None
-    params = {
-        "baseline_run_id": baseline_run_id,
-        "coverage_minimum": coverage_minimum,
-        "exact_match_pass_rate_max_drop": max_pass_rate_drop,
-    }
+    params = {"baseline_run_id": baseline_run_id}
     try:
         async with httpx.AsyncClient(timeout=30.0, headers=_api_headers()) as client:
             response = await client.get(f"{API_BASE}/runs/{run_id.strip()}/comparison", params=params)
@@ -420,6 +425,70 @@ async def create_project(name, client_name, description, tags):
             response = await client.post(f"{API_BASE}/projects", json=payload)
             response.raise_for_status()
         return {"message": "Project created.", "project": response.json()}
+    except httpx.HTTPStatusError as error:
+        return {"error": f"HTTP {error.response.status_code}: {error.response.text}"}
+    except Exception as error:
+        return {"error": str(error)}
+
+
+async def list_release_policy_revisions(project_id):
+    if not project_id:
+        return {"error": "Select a project."}
+    try:
+        project_id = _canonical_uuid(project_id, "Project ID")
+        async with httpx.AsyncClient(timeout=15.0, headers=_api_headers()) as client:
+            response = await client.get(
+                f"{API_BASE}/projects/{project_id}/release-policy-revisions"
+            )
+            response.raise_for_status()
+        return response.json()
+    except httpx.HTTPStatusError as error:
+        return {"error": f"HTTP {error.response.status_code}: {error.response.text}"}
+    except Exception as error:
+        return {"error": str(error)}
+
+
+async def create_release_policy_revision(project_id, policy_type, rules_text, change_note):
+    if not project_id:
+        return {"error": "Select a project."}
+    try:
+        project_id = _canonical_uuid(project_id, "Project ID")
+        rules = json.loads(rules_text or "{}")
+        if not isinstance(rules, dict):
+            return {"error": "Policy rules must be a JSON object."}
+    except json.JSONDecodeError as error:
+        return {"error": f"Policy rules must be valid JSON: {error.msg}"}
+    except ValueError as error:
+        return {"error": str(error)}
+    try:
+        async with httpx.AsyncClient(timeout=15.0, headers=_api_headers()) as client:
+            response = await client.post(
+                f"{API_BASE}/projects/{project_id}/release-policy-revisions",
+                json={"policy_type": policy_type, "rules": rules,
+                      "change_note": change_note.strip() if change_note else None},
+            )
+            response.raise_for_status()
+        return {"message": "Draft revision created. A workspace owner must approve it before it governs runs.",
+                "revision": response.json()}
+    except httpx.HTTPStatusError as error:
+        return {"error": f"HTTP {error.response.status_code}: {error.response.text}"}
+    except Exception as error:
+        return {"error": str(error)}
+
+
+async def approve_release_policy_revision(project_id, revision_id):
+    if not project_id or not revision_id or not revision_id.strip():
+        return {"error": "Select a project and enter a revision ID."}
+    try:
+        project_id = _canonical_uuid(project_id, "Project ID")
+        revision_id = _canonical_uuid(revision_id, "Revision ID")
+        async with httpx.AsyncClient(timeout=15.0, headers=_api_headers()) as client:
+            response = await client.post(
+                f"{API_BASE}/projects/{project_id}/release-policy-revisions/{revision_id}/approve"
+            )
+            response.raise_for_status()
+        return {"message": "Policy revision approved. Future runs bind to this immutable revision.",
+                "revision": response.json()}
     except httpx.HTTPStatusError as error:
         return {"error": f"HTTP {error.response.status_code}: {error.response.text}"}
     except Exception as error:
@@ -1013,6 +1082,40 @@ This owner-only page brings account operations into one place. The overview incl
                 project_output = gr.JSON(label="Project Result")
                 demo_seed_output = gr.JSON(label="Demo Setup")
 
+        gr.Markdown("### Governed release policy\nEditors may draft revisions. Only an owner can approve one. Future project runs bind to the latest approved immutable revision; comparison-time threshold changes are rejected.")
+        with gr.Row():
+            policy_project = gr.Dropdown(label="Client Project", choices=[])
+            policy_project_refresh = gr.Button("Refresh Projects")
+            policy_type = gr.Dropdown(label="Policy Type", choices=["model", "scenario"], value="model")
+        policy_rules = gr.Textbox(
+            label="Policy Rules JSON",
+            lines=7,
+            value='{"coverage_minimum": 0.95, "minimum_valid_cases": 10, "evaluators": {"exact_match": {"pass_rate_max_drop": 0.05}}}',
+        )
+        policy_note = gr.Textbox(label="Change Note (optional)")
+        with gr.Row():
+            policy_create = gr.Button("Create Draft Revision", variant="primary")
+            policy_list = gr.Button("List Revisions")
+        policy_revision_id = gr.Textbox(label="Revision ID to Approve")
+        policy_approve = gr.Button("Approve Revision (Owner)")
+        policy_output = gr.JSON(label="Release Policy Revisions")
+        policy_project_refresh.click(fn=project_choice_update, outputs=policy_project, inputs=[user_session])
+        policy_create.click(
+            fn=create_release_policy_revision,
+            inputs=[policy_project, policy_type, policy_rules, policy_note, user_session],
+            outputs=policy_output,
+        )
+        policy_list.click(
+            fn=list_release_policy_revisions,
+            inputs=[policy_project, user_session],
+            outputs=policy_output,
+        )
+        policy_approve.click(
+            fn=approve_release_policy_revision,
+            inputs=[policy_project, policy_revision_id, user_session],
+            outputs=policy_output,
+        )
+
     with gr.Tab("Scheduled Evaluations"):
         gr.Markdown("Schedule a saved template against a fixed dataset version. The single worker checks due daily and weekly schedules automatically.")
         with gr.Row():
@@ -1262,7 +1365,7 @@ This owner-only page brings account operations into one place. The overview incl
         dashboard_load.click(fn=get_project_dashboard, inputs=[dashboard_project, user_session], outputs=dashboard_output)
 
     with gr.Tab("Release Checks"):
-        gr.Markdown("Mark a completed run as the baseline, then compare a later completed run against the configured release rules.")
+        gr.Markdown("Owners mark a completed run as the baseline, then compare a later completed run using the immutable project policy bound at submission. Create and approve policies in **Projects**. Thresholds cannot be changed while viewing a result.")
         with gr.Row():
             baseline_mark_run_id = gr.Textbox(label="Completed Run ID to Mark as Baseline")
             baseline_mark_button = gr.Button("Mark Baseline")
@@ -1271,10 +1374,7 @@ This owner-only page brings account operations into one place. The overview incl
             release_run_id = gr.Textbox(label="Current Completed Run ID")
             release_baseline_id = gr.Dropdown(label="Baseline Run", choices=[])
             refresh_baselines_button = gr.Button("Refresh Baselines")
-        with gr.Row():
-            release_coverage_minimum = gr.Number(label="Minimum Coverage", value=0.95, minimum=0, maximum=1, precision=3)
-            release_pass_rate_drop = gr.Number(label="Maximum Exact-Match Pass-Rate Drop", value=0.05, minimum=0, maximum=1, precision=3)
-            release_check_button = gr.Button("Run Release Check", variant="primary")
+        release_check_button = gr.Button("Run Governed Release Check", variant="primary")
         release_check_summary = gr.Markdown("Choose a baseline and current run to evaluate the release rules.")
         release_check_detail = gr.JSON(label="Evaluator Comparison")
 
@@ -1286,7 +1386,7 @@ This owner-only page brings account operations into one place. The overview incl
         refresh_baselines_button.click(fn=baseline_choice_update, outputs=release_baseline_id, inputs=[user_session])
         release_check_button.click(
             fn=compare_run_with_baseline,
-            inputs=[release_run_id, release_baseline_id, release_coverage_minimum, release_pass_rate_drop, user_session],
+            inputs=[release_run_id, release_baseline_id, user_session],
             outputs=[release_check_summary, release_check_detail],
         )
 
@@ -1348,6 +1448,7 @@ This owner-only page brings account operations into one place. The overview incl
     demo.load(fn=template_choice_update, outputs=launch_template_choice, inputs=[user_session])
     demo.load(fn=template_choice_update, outputs=schedule_template, inputs=[user_session])
     demo.load(fn=project_choice_update, outputs=dashboard_project, inputs=[user_session])
+    demo.load(fn=project_choice_update, outputs=policy_project, inputs=[user_session])
     demo.load(fn=dataset_choice_update, outputs=launch_template_dataset, inputs=[user_session])
     demo.load(fn=dataset_choice_update, outputs=schedule_dataset, inputs=[user_session])
     demo.load(fn=run_provider_connection_choice_updates, outputs=[template_candidate_connection, template_judge_connection], inputs=[user_session])

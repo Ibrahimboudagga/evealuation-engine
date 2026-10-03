@@ -280,6 +280,7 @@ class ScenarioResult(StrictModel):
     scenario_id: str
     outcome: Literal["evaluated", "generation_error", "evaluation_error"]
     decision: Literal["passed", "regressed", "inconclusive"]
+    quality_decision: Literal["passed", "regressed", "inconclusive"] | None = None
     score: float | None = None
     simulated: bool
     checks: list[CheckResult] = Field(default_factory=list)

@@ -1,0 +1,7 @@
+# Non-production Fernet keys committed for deterministic CI and test setup.
+# These fingerprints are exact; future findings in the same files still fail.
+cd29ddcaa9ca957920f980c034c1b3cc03c13da9:.github/workflows/tests.yml:generic-api-key:148
+cd29ddcaa9ca957920f980c034c1b3cc03c13da9:.github/workflows/tests.yml:generic-api-key:286
+2e0fff752ba31c14080af3f8acd49c5e0e20f5ef:tests/conftest.py:generic-api-key:11
+# Deterministic non-secret Fernet key used to verify placeholder rejection.
+744da142d7f7451126be5fc2649a953fdcab1057:tests/test_identity_hardening.py:generic-api-key:133

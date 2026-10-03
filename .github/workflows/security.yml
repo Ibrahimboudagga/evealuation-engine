@@ -1,0 +1,159 @@
+name: Security
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: '23 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  codeql:
+    name: CodeQL / ${{ matrix.language }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python, actions]
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@7999b86c43a865dc79d8923397f35af22de63401 # v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-extended
+
+      - name: Analyze source
+        uses: github/codeql-action/analyze@7999b86c43a865dc79d8923397f35af22de63401 # v4
+        with:
+          category: /language:${{ matrix.language }}
+
+  dependency-audit:
+    name: Python dependency audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Audit resolved Python dependencies
+        uses: pypa/gh-action-pip-audit@1220774d901786e6f652ae159f7b6bc8fea6d266 # v1.1.0
+        with:
+          inputs: requirements.txt
+
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out complete history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Scan commits for credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          scanner='ghcr.io/gitleaks/gitleaks@sha256:691af3c7c5a48b16f187ce3446d5f194838f91238f27270ed36eef6359a574d9'
+          docker pull "$scanner"
+          docker run --rm --network none \
+            --volume "$GITHUB_WORKSPACE:/repo:ro" \
+            --workdir /repo \
+            --env GIT_CONFIG_COUNT=1 \
+            --env GIT_CONFIG_KEY_0=safe.directory \
+            --env GIT_CONFIG_VALUE_0=/repo \
+            "$scanner" git --redact=100 --verbose --timeout=600 .
+
+  filesystem-scan:
+    name: Filesystem vulnerability and configuration scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Scan source tree
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,misconfig
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '1'
+          format: table
+
+  container-scan:
+    name: Container vulnerability scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Build scan target
+        run: docker build --tag evaluation-engine:security-scan .
+
+      - name: Scan image operating-system and Python packages
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: evaluation-engine:security-scan
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '1'
+          format: table
+
+  security-gate:
+    name: Security gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    if: always()
+    needs:
+      - codeql
+      - dependency-audit
+      - secret-scan
+      - filesystem-scan
+      - container-scan
+
+    steps:
+      - name: Require every security scan
+        shell: bash
+        env:
+          CODEQL_RESULT: ${{ needs.codeql.result }}
+          DEPENDENCY_RESULT: ${{ needs.dependency-audit.result }}
+          SECRET_RESULT: ${{ needs.secret-scan.result }}
+          FILESYSTEM_RESULT: ${{ needs.filesystem-scan.result }}
+          CONTAINER_RESULT: ${{ needs.container-scan.result }}
+        run: |
+          set -euo pipefail
+          test "$CODEQL_RESULT" = success
+          test "$DEPENDENCY_RESULT" = success
+          test "$SECRET_RESULT" = success
+          test "$FILESYSTEM_RESULT" = success
+          test "$CONTAINER_RESULT" = success
