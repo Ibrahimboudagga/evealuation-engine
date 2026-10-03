@@ -9,6 +9,8 @@ from app.database.connection import get_db
 from app.database.models import ScenarioSuiteDB, ScenarioRunDB, ScenarioShareDB
 from app.services.scenario_service import ScenarioService, suite_payload, run_payload, digest, now, audit
 from app.services.identity_service import IdentityService, WRITE_ROLES
+from app.schemas.release import ScenarioReleaseRules
+from app.services.release_policy_service import ReleasePolicyService, policy_snapshot
 from app.services.usage_service import WorkspaceLimitExceeded
 
 
@@ -22,18 +24,11 @@ class SuiteUpload(StrictRequest):
     content: str = Field(min_length=1, max_length=5_000_000)
 
 
-class ScenarioPolicy(StrictRequest):
-    coverage_minimum: float = Field(default=1, ge=0, le=1)
-    minimum_valid_cases: int = Field(default=1, ge=1, le=1000)
-    pass_rate_minimum: float = Field(default=1, ge=0, le=1)
-    pass_rate_max_drop: float = Field(default=0, ge=0, le=1)
-
-
 class EvidenceUpload(StrictRequest):
     suite_id: str
     target_build: str = Field(min_length=1, max_length=255)
     evidence: dict[str, dict]
-    release_rules: ScenarioPolicy = Field(default_factory=ScenarioPolicy)
+    release_rules: ScenarioReleaseRules = Field(default_factory=ScenarioReleaseRules)
 
 
 class ShareCreate(StrictRequest):
@@ -43,6 +38,7 @@ class ShareCreate(StrictRequest):
 
 def register_scenario_routes(app, auth_dependency, project_access):
     service = ScenarioService()
+    release_policies = ReleasePolicyService()
 
     def require_context(context, write=False):
         if context is None:
@@ -95,8 +91,11 @@ def register_scenario_routes(app, auth_dependency, project_access):
     def import_evidence(req: EvidenceUpload, context=Depends(auth_dependency)):
         suite = accessible(ScenarioSuiteDB, req.suite_id, context, True)
         try:
+            approved_policy = release_policies.latest_approved(suite.project_id, "scenario")
             return service.import_evidence(context, suite, req.target_build,
-                                           req.evidence, req.release_rules.model_dump())
+                                           req.evidence,
+                                           approved_policy.rules if approved_policy else req.release_rules.model_dump(),
+                                           policy_snapshot(approved_policy))
         except WorkspaceLimitExceeded as error:
             raise HTTPException(429, str(error))
         except ValueError as error:

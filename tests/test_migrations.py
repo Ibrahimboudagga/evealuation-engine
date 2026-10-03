@@ -19,6 +19,17 @@ def _upgrade(database_path: Path) -> None:
     command.upgrade(config, "head")
 
 
+def _upgrade_with_foreign_keys(database_path: Path) -> None:
+    config = Config(str(PROJECT_ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(PROJECT_ROOT / "alembic"))
+    engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+    with engine.connect() as connection:
+        connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+        connection.commit()
+        config.attributes["connection"] = connection
+        command.upgrade(config, "head")
+
+
 def _create_legacy_database(database_path: Path) -> None:
     """Create the historical schema represented by the pre-migration database."""
     connection = sqlite3.connect(database_path)
@@ -105,14 +116,17 @@ def test_migration_creates_a_fresh_database(tmp_path):
     _upgrade(database_path)
 
     inspector = inspect(create_engine(f"sqlite:///{database_path}"))
-    assert {"workspaces", "users", "user_sessions", "workspace_memberships", "provider_connections", "evaluation_templates", "report_shares", "audit_events", "workspace_usage_snapshots", "activation_events", "evaluation_schedules", "schedule_executions", "worker_states", "projects", "datasets", "dataset_versions", "evaluation_runs", "evaluation_results", "pairwise_runs", "pairwise_comparisons"} <= set(inspector.get_table_names())
+    assert {"workspaces", "users", "user_sessions", "auth_throttles", "workspace_memberships", "provider_connections", "evaluation_templates", "report_shares", "audit_events", "workspace_usage_snapshots", "activation_events", "evaluation_schedules", "schedule_executions", "worker_states", "projects", "project_release_policy_revisions", "datasets", "dataset_versions", "evaluation_runs", "evaluation_results", "pairwise_runs", "pairwise_comparisons"} <= set(inspector.get_table_names())
     workspace_columns = {column["name"] for column in inspector.get_columns("workspaces")}
     assert "notification_settings_json" in workspace_columns
+    assert {"content_retention_enabled", "legal_hold_at", "legal_hold_reason",
+            "last_retention_applied_at"} <= workspace_columns
     assert {column["name"] for column in inspector.get_columns("evaluation_results")} >= {"outcome", "error_message"}
     assert {column["name"] for column in inspector.get_columns("evaluation_runs")} >= {
         "run_configuration_json", "configuration_verified", "project_id", "is_baseline",
         "attempt_count", "max_attempts", "next_attempt_at", "cancellation_requested_at",
         "worker_claimed_at", "worker_id", "last_transient_error",
+        "release_policy_revision_id",
     }
     assert next(column for column in inspector.get_columns("evaluation_results") if column["name"] == "score")["nullable"]
     assert "workspace_id" in {column["name"] for column in inspector.get_columns("projects")}
@@ -124,6 +138,9 @@ def test_migration_creates_a_fresh_database(tmp_path):
         column["name"] for column in inspector.get_columns("workspaces")
     }
     assert "occurrence_count" in {column["name"] for column in inspector.get_columns("activation_events")}
+    assert "release_policy_revision_id" in {
+        column["name"] for column in inspector.get_columns("scenario_runs")
+    }
 
 
 def test_migration_preserves_copied_legacy_records_and_marks_them_unverified(tmp_path):
@@ -148,6 +165,9 @@ def test_migration_preserves_copied_legacy_records_and_marks_them_unverified(tmp
     pairwise_run = connection.execute(
         "SELECT project_id FROM pairwise_runs WHERE id = 'pairwise-1'"
     ).fetchone()
+    policy_link = connection.execute(
+        "SELECT release_policy_revision_id FROM evaluation_runs WHERE id = 'run-1'"
+    ).fetchone()
     dataset = connection.execute(
         "SELECT project_id FROM datasets WHERE id = 'dataset-1'"
     ).fetchone()
@@ -157,6 +177,7 @@ def test_migration_preserves_copied_legacy_records_and_marks_them_unverified(tmp
     assert comparison == ("tie", 0.0, 0.0, "unverified", None)
     assert run == ("completed", 0, None, None, None, 0, None, 0)
     assert pairwise_run == (None,)
+    assert policy_link == (None,)
     assert dataset == (None,)
 
     inspector = inspect(create_engine(f"sqlite:///{upgraded_copy}"))
@@ -166,3 +187,61 @@ def test_migration_preserves_copied_legacy_records_and_marks_them_unverified(tmp
     assert comparison_columns["winner"]["nullable"]
     assert comparison_columns["score_a"]["nullable"]
     assert comparison_columns["score_b"]["nullable"]
+
+
+def test_hardening_migration_upgrades_populated_rev18_with_sqlite_foreign_keys(tmp_path):
+    database_path = tmp_path / "rev18-foreign-keys.db"
+    connection = sqlite3.connect(database_path)
+    connection.executescript(
+        """
+        PRAGMA foreign_keys=ON;
+        CREATE TABLE alembic_version (version_num VARCHAR(32) PRIMARY KEY);
+        INSERT INTO alembic_version VALUES ('20260928_18');
+        CREATE TABLE workspaces (id VARCHAR(36) PRIMARY KEY, name VARCHAR(255) NOT NULL);
+        CREATE TABLE users (id VARCHAR(36) PRIMARY KEY, email VARCHAR(255) NOT NULL);
+        CREATE TABLE projects (
+            id VARCHAR(36) PRIMARY KEY,
+            workspace_id VARCHAR(36) REFERENCES workspaces(id)
+        );
+        CREATE TABLE evaluation_runs (
+            id VARCHAR(255) PRIMARY KEY,
+            project_id VARCHAR(36) REFERENCES projects(id)
+        );
+        CREATE TABLE evaluation_results (
+            id INTEGER PRIMARY KEY,
+            run_id VARCHAR(255) REFERENCES evaluation_runs(id)
+        );
+        CREATE TABLE scenario_runs (
+            id VARCHAR(36) PRIMARY KEY,
+            workspace_id VARCHAR(36) NOT NULL REFERENCES workspaces(id),
+            project_id VARCHAR(36) NOT NULL REFERENCES projects(id)
+        );
+        INSERT INTO workspaces VALUES ('workspace-1', 'Existing agency');
+        INSERT INTO users VALUES ('owner-1', 'owner@example.com');
+        INSERT INTO projects VALUES ('project-1', 'workspace-1');
+        INSERT INTO evaluation_runs VALUES ('run-1', 'project-1');
+        INSERT INTO evaluation_results VALUES (1, 'run-1');
+        INSERT INTO scenario_runs VALUES ('scenario-1', 'workspace-1', 'project-1');
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    _upgrade_with_foreign_keys(database_path)
+
+    engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+    inspector = inspect(engine)
+    assert "release_policy_revision_id" in {
+        column["name"] for column in inspector.get_columns("evaluation_runs")
+    }
+    assert "release_policy_revision_id" in {
+        column["name"] for column in inspector.get_columns("scenario_runs")
+    }
+    assert any(
+        fk["referred_table"] == "project_release_policy_revisions"
+        for fk in inspector.get_foreign_keys("evaluation_runs")
+    )
+    with engine.connect() as upgraded:
+        assert upgraded.exec_driver_sql("SELECT name FROM workspaces WHERE id='workspace-1'").scalar() == "Existing agency"
+        assert upgraded.exec_driver_sql("SELECT COUNT(*) FROM evaluation_results").scalar() == 1
+        assert upgraded.exec_driver_sql("PRAGMA foreign_key_check").all() == []

@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, Header, HTTPException, UploadFile, File, Form, Query, Request
 from fastapi.responses import Response
+from sqlalchemy.exc import IntegrityError
 
 from app.api.schemas import (
     RunRequest,
@@ -64,8 +65,12 @@ from app.api.schemas import (
     ProjectCreateRequest,
     ProjectUpdateRequest,
     ProjectResponse,
+    ReleasePolicyRevisionCreateRequest,
+    ReleasePolicyRevisionResponse,
     ProjectsListResponse,
     ProjectDeleteResponse,
+    ProjectDataDeletionRequest,
+    ProjectDataDeletionResponse,
     PairwiseRunRequest,
     PairwiseRunResponse,
     PairwiseRunStatusResponse,
@@ -75,7 +80,17 @@ from app.api.schemas import (
     PairwiseComparisonItem,
 )
 from app.database.connection import get_db, init_db, database_is_reachable
-from app.database.models import ScenarioSuiteDB, DatasetDB, EvaluationRunDB, EvaluationResultDB, MembershipDB, PairwiseRunDB, ProjectAccessDB, ProjectDB
+from app.database.models import (
+    DatasetDB,
+    EvaluationResultDB,
+    EvaluationRunDB,
+    MembershipDB,
+    PairwiseRunDB,
+    ProjectAccessDB,
+    ProjectDB,
+    ProjectReleasePolicyRevisionDB,
+    ScenarioSuiteDB,
+)
 from app.errors import sanitize_error
 from app.evaluators.registry import EvaluatorRegistry
 from app.evaluators.pairwise_judge import PairwiseJudgeEvaluator
@@ -92,7 +107,14 @@ from app.services.baseline_service import BaselineService
 from app.services.demo_seed import DemoSeedService
 from app.services.project_service import ProjectService
 from app.services.report_service import ReportService
-from app.services.identity_service import AuthContext, IdentityService, OWNER_ROLES, WRITE_ROLES
+from app.services.identity_service import (
+    AuthContext,
+    AuthenticationRateLimitedError,
+    IdentityService,
+    LastWorkspaceOwnerError,
+    OWNER_ROLES,
+    WRITE_ROLES,
+)
 from app.services.provider_connection_service import ProviderConnectionService
 from app.services.agency_service import AgencyService
 from app.services.operations_service import OperationsService
@@ -103,6 +125,11 @@ from app.services.usage_service import UsageService, WorkspaceLimitExceeded
 from app.services.billing_service import BillingService
 from app.services.activation_service import ActivationService
 from app.services.notification_service import NotificationService
+from app.services.release_policy_service import (
+    ReleasePolicyIntegrityError,
+    ReleasePolicyService,
+    policy_snapshot,
+)
 from app.config import deployment_health, require_production_configuration, get_settings
 from app.schemas.outcomes import EvaluationOutcome, RunStatus
 
@@ -126,6 +153,7 @@ _usage_service = UsageService()
 _billing_service = BillingService()
 _activation_service = ActivationService()
 _notification_service = NotificationService()
+_release_policy_service = ReleasePolicyService()
 
 
 async def get_auth_context(
@@ -364,6 +392,22 @@ def _project_to_response(project) -> ProjectResponse:
     )
 
 
+def _release_policy_to_response(revision) -> ReleasePolicyRevisionResponse:
+    return ReleasePolicyRevisionResponse(
+        id=revision.id,
+        project_id=revision.project_id,
+        policy_type=revision.policy_type,
+        version_number=revision.version_number,
+        rules=revision.rules,
+        rules_sha256=revision.rules_sha256,
+        change_note=revision.change_note,
+        created_by_user_id=revision.created_by_user_id,
+        created_at=revision.created_at,
+        approved_by_user_id=revision.approved_by_user_id,
+        approved_at=revision.approved_at,
+    )
+
+
 @app.on_event("startup")
 async def startup():
     require_production_configuration()
@@ -458,9 +502,9 @@ async def get_retention_settings(context: Optional[AuthContext] = Depends(get_au
     if context is None:
         raise HTTPException(status_code=401, detail="Workspace authentication is required")
     _require_role(context, OWNER_ROLES)
-    return RetentionSettingsResponse(retention_days=await asyncio.to_thread(
-        _operations_service.retention_days, context.workspace_id
-    ))
+    return RetentionSettingsResponse(**(await asyncio.to_thread(
+        _operations_service.retention_settings, context.workspace_id
+    )))
 
 
 @app.put("/operations/retention", response_model=RetentionSettingsResponse)
@@ -470,9 +514,23 @@ async def update_retention_settings(
     if context is None:
         raise HTTPException(status_code=401, detail="Workspace authentication is required")
     _require_role(context, OWNER_ROLES)
-    days = await asyncio.to_thread(_operations_service.set_retention_days, context.workspace_id, req.retention_days)
-    await _audit(context, "retention.updated", "workspace", context.workspace_id, metadata={"retention_days": days})
-    return RetentionSettingsResponse(retention_days=days)
+    try:
+        settings = await asyncio.to_thread(
+            _operations_service.set_retention_settings,
+            context.workspace_id,
+            req.retention_days,
+            req.content_retention_enabled,
+            req.legal_hold,
+            req.legal_hold_reason,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error))
+    await _audit(context, "retention.updated", "workspace", context.workspace_id, metadata={
+        "retention_days": settings["retention_days"],
+        "content_retention_enabled": settings["content_retention_enabled"],
+        "legal_hold": settings["legal_hold"],
+    })
+    return RetentionSettingsResponse(**settings)
 
 
 @app.post("/operations/retention/apply", response_model=RetentionApplyResponse)
@@ -480,8 +538,9 @@ async def apply_retention_settings(context: Optional[AuthContext] = Depends(get_
     if context is None:
         raise HTTPException(status_code=401, detail="Workspace authentication is required")
     _require_role(context, OWNER_ROLES)
-    result = await asyncio.to_thread(_operations_service.apply_retention, context.workspace_id)
-    await _audit(context, "retention.applied", "workspace", context.workspace_id, metadata=result)
+    result = await asyncio.to_thread(
+        _operations_service.apply_retention, context.workspace_id, context
+    )
     return RetentionApplyResponse(**result)
 
 
@@ -511,6 +570,8 @@ async def sign_in(req: SignInRequest):
         context, token, expires_at = await asyncio.to_thread(
             _identity_service.sign_in, req.email, req.password, req.workspace_id
         )
+    except AuthenticationRateLimitedError as error:
+        raise HTTPException(status_code=429, detail=str(error), headers={"Retry-After": str(get_settings().auth_lockout_seconds)})
     except ValueError as error:
         raise HTTPException(status_code=401, detail=str(error))
     await _audit(context, "user.signed_in", "user", context.user_id)
@@ -557,6 +618,8 @@ async def add_workspace_member(
         )
     except PermissionError as error:
         raise HTTPException(status_code=403, detail=str(error))
+    except LastWorkspaceOwnerError as error:
+        raise HTTPException(status_code=409, detail=str(error))
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
     await _audit(context, "member.added", "user", member.user_id, metadata={"role": member.role})
@@ -578,7 +641,12 @@ async def list_workspace_members(context: Optional[AuthContext] = Depends(get_au
 async def update_workspace_member(user_id: str, req: WorkspaceMemberUpdateRequest, context: Optional[AuthContext] = Depends(get_auth_context)):
     if context is None: raise HTTPException(status_code=401, detail="Workspace authentication is required")
     _require_role(context, OWNER_ROLES)
-    if not await asyncio.to_thread(_identity_service.update_member_role, context.workspace_id, user_id, req.role): raise HTTPException(status_code=404, detail="Member not found")
+    try:
+        updated = await asyncio.to_thread(_identity_service.update_member_role, context.workspace_id, user_id, req.role)
+    except LastWorkspaceOwnerError as error:
+        raise HTTPException(status_code=409, detail=str(error))
+    if not updated:
+        raise HTTPException(status_code=404, detail="Member not found")
     await _audit(context, "member.role_updated", "user", user_id, metadata={"role": req.role})
     return Response(status_code=204)
 
@@ -588,7 +656,12 @@ async def remove_workspace_member(user_id: str, context: Optional[AuthContext] =
     if context is None: raise HTTPException(status_code=401, detail="Workspace authentication is required")
     _require_role(context, OWNER_ROLES)
     if user_id == context.user_id: raise HTTPException(status_code=400, detail="Owners cannot remove themselves")
-    if not await asyncio.to_thread(_identity_service.remove_member, context.workspace_id, user_id): raise HTTPException(status_code=404, detail="Member not found")
+    try:
+        removed = await asyncio.to_thread(_identity_service.remove_member, context.workspace_id, user_id)
+    except LastWorkspaceOwnerError as error:
+        raise HTTPException(status_code=409, detail=str(error))
+    if not removed:
+        raise HTTPException(status_code=404, detail="Member not found")
     await _audit(context, "member.removed", "user", user_id)
     return Response(status_code=204)
 
@@ -976,8 +1049,11 @@ async def create_run(req: RunRequest, context: Optional[AuthContext] = Depends(g
     _require_role(context, WRITE_ROLES)
     if context is not None and req.dataset_path:
         raise HTTPException(status_code=400, detail="Workspace runs must use a registered dataset_id.")
+    dataset_record = None
+    project_id = None
     if req.dataset_id:
-        _require_dataset_access(req.dataset_id, context, write=True)
+        dataset_record = _require_dataset_access(req.dataset_id, context, write=True)
+        project_id = dataset_record.project_id
         if context is not None:
             try:
                 await asyncio.to_thread(
@@ -1072,6 +1148,16 @@ async def create_run(req: RunRequest, context: Optional[AuthContext] = Depends(g
         judge_provider=evaluator_provider,
         judge_prompt_template=req.judge_prompt_template,
     )
+    try:
+        approved_policy = await asyncio.to_thread(
+            _release_policy_service.latest_approved, project_id, "model"
+        )
+    except ReleasePolicyIntegrityError as error:
+        raise HTTPException(status_code=409, detail=str(error))
+    effective_release_rules = approved_policy.rules if approved_policy else (
+        req.release_rules.model_dump() if req.release_rules else None
+    )
+    release_policy = policy_snapshot(approved_policy)
     runner = EvaluationRunner(
         provider=candidate_provider,
         registry=registry,
@@ -1094,7 +1180,8 @@ async def create_run(req: RunRequest, context: Optional[AuthContext] = Depends(g
             },
             "judge_prompt_template": req.judge_prompt_template,
             "template_execution": {"timeout_seconds": req.timeout_seconds},
-            "release_rules": req.release_rules.model_dump() if req.release_rules else None,
+            "release_rules": effective_release_rules,
+            "release_policy": release_policy,
             "evaluator_settings": {name: value.model_dump() for name, value in req.evaluator_settings.items()},
             "report_preferences": req.report_preferences,
         },
@@ -1110,8 +1197,10 @@ async def create_run(req: RunRequest, context: Optional[AuthContext] = Depends(g
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    project_id = _require_dataset_access(req.dataset_id, context).project_id if req.dataset_id else None
-    await _audit(context, "run.launched", "evaluation_run", run_id, project_id, {"simulated": runner._is_simulated()})
+    await _audit(context, "run.launched", "evaluation_run", run_id, project_id, {
+        "simulated": runner._is_simulated(),
+        "release_policy_revision_id": approved_policy.id if approved_policy else None,
+    })
     return RunResponse(run_id=run_id, status=RunStatus.QUEUED, is_simulated=runner._is_simulated())
 
 
@@ -1248,6 +1337,7 @@ async def list_runs(baseline_only: bool = Query(default=False, description="List
 @app.put("/runs/{run_id}/baseline", response_model=BaselineMarkResponse)
 async def mark_run_as_baseline(run_id: str, context: Optional[AuthContext] = Depends(get_auth_context)):
     _require_run_access(run_id, context, write=True)
+    _require_role(context, OWNER_ROLES)
     try:
         run = await asyncio.to_thread(_baseline_service.mark_baseline, run_id)
     except ValueError as error:
@@ -1264,6 +1354,11 @@ async def compare_run_to_baseline(
     exact_match_pass_rate_max_drop: Optional[float] = Query(default=None, ge=0.0, le=1.0),
     context: Optional[AuthContext] = Depends(get_auth_context),
 ):
+    if coverage_minimum is not None or exact_match_pass_rate_max_drop is not None:
+        raise HTTPException(
+            status_code=422,
+            detail="Official comparisons use the policy bound when the run was submitted; query-time threshold overrides are not allowed.",
+        )
     _require_run_access(run_id, context)
     _require_run_access(baseline_run_id, context)
     try:
@@ -1271,8 +1366,6 @@ async def compare_run_to_baseline(
             _baseline_service.compare,
             run_id,
             baseline_run_id,
-            coverage_minimum,
-            exact_match_pass_rate_max_drop,
         )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
@@ -1448,17 +1541,149 @@ async def update_project(project_id: str, req: ProjectUpdateRequest, context: Op
     return _project_to_response(project)
 
 
+@app.post(
+    "/projects/{project_id}/release-policy-revisions",
+    response_model=ReleasePolicyRevisionResponse,
+    status_code=201,
+)
+async def create_release_policy_revision(
+    project_id: str,
+    req: ReleasePolicyRevisionCreateRequest,
+    context: Optional[AuthContext] = Depends(get_auth_context),
+):
+    if context is None:
+        raise HTTPException(status_code=401, detail="Workspace authentication is required")
+    _require_project_access(project_id, context, write=True)
+    try:
+        revision = await asyncio.to_thread(
+            _release_policy_service.create_revision,
+            context,
+            project_id,
+            req.policy_type,
+            req.rules,
+            req.change_note,
+        )
+    except IntegrityError:
+        raise HTTPException(
+            status_code=409,
+            detail="A release policy revision was created concurrently. Retry the request.",
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error))
+    await _audit(context, "release_policy.revision_created", "release_policy_revision", revision.id,
+                 project_id, {"version": revision.version_number, "sha256": revision.rules_sha256,
+                              "policy_type": revision.policy_type})
+    return _release_policy_to_response(revision)
+
+
+@app.get(
+    "/projects/{project_id}/release-policy-revisions",
+    response_model=list[ReleasePolicyRevisionResponse],
+)
+async def list_release_policy_revisions(
+    project_id: str,
+    policy_type: Optional[Literal["model", "scenario"]] = Query(default=None),
+    context: Optional[AuthContext] = Depends(get_auth_context),
+):
+    if context is None:
+        raise HTTPException(status_code=401, detail="Workspace authentication is required")
+    _require_project_access(project_id, context)
+    revisions = await asyncio.to_thread(
+        _release_policy_service.list_revisions, context.workspace_id, project_id, policy_type
+    )
+    return [_release_policy_to_response(revision) for revision in revisions]
+
+
+@app.post(
+    "/projects/{project_id}/release-policy-revisions/{revision_id}/approve",
+    response_model=ReleasePolicyRevisionResponse,
+)
+async def approve_release_policy_revision(
+    project_id: str,
+    revision_id: str,
+    context: Optional[AuthContext] = Depends(get_auth_context),
+):
+    if context is None:
+        raise HTTPException(status_code=401, detail="Workspace authentication is required")
+    _require_project_access(project_id, context)
+    _require_role(context, OWNER_ROLES)
+    try:
+        revision = await asyncio.to_thread(
+            _release_policy_service.approve, context, project_id, revision_id
+        )
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error))
+    except ReleasePolicyIntegrityError as error:
+        raise HTTPException(status_code=409, detail=str(error))
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error))
+    await _audit(context, "release_policy.approved", "release_policy_revision", revision.id,
+                 project_id, {"version": revision.version_number, "sha256": revision.rules_sha256,
+                              "policy_type": revision.policy_type})
+    return _release_policy_to_response(revision)
+
+
 @app.delete("/projects/{project_id}", response_model=ProjectDeleteResponse)
 async def delete_project(project_id: str, context: Optional[AuthContext] = Depends(get_auth_context)):
     _require_project_access(project_id, context, write=True)
     with get_db() as db:
         if db.query(ScenarioSuiteDB.id).filter_by(project_id=project_id).first():
             raise HTTPException(409, "Delete scenario runs and suite versions before deleting this project.")
+        if db.query(ProjectReleasePolicyRevisionDB.id).filter_by(project_id=project_id).first():
+            raise HTTPException(
+                409,
+                "This project has governed release policies. Use the customer-data deletion workflow.",
+            )
     deleted = await asyncio.to_thread(_project_service.delete_project, project_id)
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
     await _audit(context, "project.deleted", "project", project_id, project_id)
     return ProjectDeleteResponse(message="Project deleted; datasets and runs were unassigned.", id=project_id)
+
+
+@app.get(
+    "/projects/{project_id}/customer-data/deletion-preview",
+    response_model=ProjectDataDeletionResponse,
+)
+async def preview_project_customer_data_deletion(
+    project_id: str, context: Optional[AuthContext] = Depends(get_auth_context)
+):
+    if context is None:
+        raise HTTPException(status_code=401, detail="Workspace authentication is required")
+    _require_role(context, OWNER_ROLES)
+    _require_project_access(project_id, context)
+    preview = await asyncio.to_thread(
+        _operations_service.project_deletion_preview, context.workspace_id, project_id
+    )
+    return ProjectDataDeletionResponse(**preview)
+
+
+@app.delete(
+    "/projects/{project_id}/customer-data",
+    response_model=ProjectDataDeletionResponse,
+)
+async def delete_project_customer_data(
+    project_id: str,
+    req: ProjectDataDeletionRequest,
+    context: Optional[AuthContext] = Depends(get_auth_context),
+):
+    if context is None:
+        raise HTTPException(status_code=401, detail="Workspace authentication is required")
+    _require_role(context, OWNER_ROLES)
+    _require_project_access(project_id, context)
+    try:
+        receipt = await asyncio.to_thread(
+            _operations_service.purge_project_data,
+            context.workspace_id,
+            project_id,
+            req.confirm_project_name,
+            context,
+        )
+    except PermissionError as error:
+        raise HTTPException(status_code=409, detail=str(error))
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error))
+    return ProjectDataDeletionResponse(**receipt)
 
 
 # ── Dataset Endpoints ────────────────────────────────────────

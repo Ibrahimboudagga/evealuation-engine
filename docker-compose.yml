@@ -20,6 +20,7 @@ services:
       DATABASE_URL: postgresql+psycopg://evaluation:${POSTGRES_PASSWORD}@db:5432/evaluation
       WORKSPACE_ENCRYPTION_KEY: ${WORKSPACE_ENCRYPTION_KEY:?Set WORKSPACE_ENCRYPTION_KEY in .env}
       BOOTSTRAP_SECRET: ${BOOTSTRAP_SECRET:?Set BOOTSTRAP_SECRET in .env}
+      AUTH_THROTTLE_SECRET: ${AUTH_THROTTLE_SECRET:?Set AUTH_THROTTLE_SECRET in .env}
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:

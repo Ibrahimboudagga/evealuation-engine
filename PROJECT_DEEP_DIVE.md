@@ -1,11 +1,13 @@
 # LLM Evaluation Engine: Deep Project Guide
 
-> September 2026 update: the detailed original guide below describes the
+> 30 September 2026 update: the detailed original guide below describes the
 > earlier account/runner architecture. Read [REANALYSIS_REMEDIATION.md](REANALYSIS_REMEDIATION.md)
 > and [SCENARIO_EVALUATION.md](SCENARIO_EVALUATION.md) for the current scoring
-> contract, independent schedule dispatch, workspace scenario evidence workflow,
-> and verified deployment limits. This repository is a controlled pilot
-> candidate; source features alone do not establish production readiness.
+> contract, immutable owner-approved release policy revisions, persistent
+> sign-in throttling, customer-data retention/deletion controls, provenance-safe
+> scenario decisions, security gates, independent schedule dispatch, and
+> verified deployment limits. This repository is a controlled pilot candidate;
+> source features alone do not establish production readiness.
 
 > Repository state covered: feature/admin-console-pilot-rehearsal, 25 September 2026.
 >
@@ -406,8 +408,12 @@ without returning secrets. It includes worker heartbeat, claimed run, queue
 depth, retry and failed-run counts, and overdue-schedule count.
 
 Audit events record important actions with actor identity and safe metadata.
-Retention settings can remove expired shares and old audit entries; current
-retention cleanup intentionally does not remove evaluation data.
+Retention is disabled for customer content by default. When an owner enables
+it, the service can remove aged terminal run/results, retry archives, imported
+scenario evidence, empty old suites, and unreferenced inactive dataset
+versions in addition to expired shares and old audit entries. An active legal
+hold freezes every deletion category. Confirmed project customer-data deletion
+and its content-free receipt commit in one transaction.
 
 `PILOT_REHEARSAL.md` is the operational walkthrough for a clean, isolated
 Compose project. It covers workspace bootstrap, demo seeding, usage limits,

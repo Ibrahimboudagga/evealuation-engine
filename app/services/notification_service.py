@@ -44,7 +44,11 @@ class NotificationService:
             "enabled": bool(stored.get("enabled", DEFAULT_SETTINGS["enabled"])),
             "recipients": list(stored.get("recipients", DEFAULT_SETTINGS["recipients"])),
             "events": list(stored.get("events", DEFAULT_SETTINGS["events"])),
-            "delivery_status": "configured" if stored.get("enabled") and stored.get("recipients") else "not_configured",
+            "delivery_status": (
+                "preferences_saved_delivery_unavailable"
+                if stored.get("enabled") and stored.get("recipients")
+                else "not_configured"
+            ),
         }
 
     def update(self, workspace_id: str, values: Mapping[str, Any]) -> dict[str, Any]:

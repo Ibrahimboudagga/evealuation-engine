@@ -30,17 +30,47 @@ def run(client, headers, suite_id, answer=4):
 def test_scenario_upload_review_comparison_export_share_and_revoke():
     with TestClient(app) as client:
         headers, project = setup(client)
+        draft = client.post(
+            f"/projects/{project}/release-policy-revisions",
+            headers=headers,
+            json={
+                "policy_type": "scenario",
+                "rules": {
+                    "coverage_minimum": 1,
+                    "minimum_valid_cases": 1,
+                    "pass_rate_minimum": 1,
+                    "pass_rate_max_drop": 0,
+                },
+            },
+        )
+        assert draft.status_code == 201, draft.text
+        approved = client.post(
+            f"/projects/{project}/release-policy-revisions/{draft.json()['id']}/approve",
+            headers=headers,
+        )
+        assert approved.status_code == 200, approved.text
         version = suite(client, headers, project)
         baseline = run(client, headers, version["id"])
+        assert baseline["metrics"]["decision"] == "inconclusive"
+        assert baseline["metrics"]["quality_decision"] == "passed"
+        assert baseline["results"][0]["decision"] == "inconclusive"
+        assert baseline["results"][0]["quality_decision"] == "passed"
+        assert baseline["configuration"]["release_policy"]["governance_verified"] is True
         regression = run(client, headers, version["id"], answer=3)
         comparison = client.get(f"/scenario-runs/{regression['id']}/compare",
             params={"baseline_run_id": baseline["id"]}, headers=headers)
-        assert comparison.json()["decision"] == "regressed", comparison.text
+        assert comparison.json()["decision"] == "inconclusive", comparison.text
+        assert comparison.json()["quality_decision"] == "regressed"
         corrected = run(client, headers, version["id"])
-        assert client.get(f"/scenario-runs/{corrected['id']}/compare",
-            params={"baseline_run_id": baseline["id"]}, headers=headers).json()["decision"] == "passed"
+        corrected_comparison = client.get(f"/scenario-runs/{corrected['id']}/compare",
+            params={"baseline_run_id": baseline["id"]}, headers=headers).json()
+        assert corrected_comparison["decision"] == "inconclusive"
+        assert corrected_comparison["quality_decision"] == "passed"
+        assert corrected_comparison["provenance_verified"] is False
+        assert corrected_comparison["release_policy"]["governance_verified"] is True
         report = client.get(f"/scenario-runs/{regression['id']}/export", headers=headers)
         assert report.status_code == 200 and "SIMULATED" in report.text and "correct" in report.text
+        assert "Official release decision: inconclusive" in report.text
         shared = client.post(f"/scenario-runs/{regression['id']}/shares", headers=headers,
             json={"expires_in_hours": 1})
         assert shared.status_code == 201, shared.text
@@ -63,6 +93,7 @@ def test_missing_evidence_cannot_pass_and_unknown_cases_are_rejected():
         assert response.status_code == 201, response.text
         data = response.json()
         assert data["metrics"]["decision"] == "inconclusive"
+        assert data["metrics"]["quality_decision"] == "inconclusive"
         assert data["metrics"]["coverage"] == 0
         assert data["results"][0]["score"] is None
         unknown = client.post("/scenario-runs", headers=headers, json={"suite_id": version["id"],

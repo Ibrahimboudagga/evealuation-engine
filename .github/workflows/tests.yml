@@ -147,6 +147,7 @@ jobs:
       POSTGRES_PASSWORD: ciContainerPassword2026
       WORKSPACE_ENCRYPTION_KEY: nE2GzCPhZYs7pF5uHnozL_Digkc8jvOnSeys1bpFHj8=
       BOOTSTRAP_SECRET: ci-bootstrap-secret
+      AUTH_THROTTLE_SECRET: ci-auth-throttle-secret-at-least-32-characters
 
     steps:
       - name: Check out source

@@ -34,7 +34,7 @@ def test_owner_admin_console_combines_account_operations_without_credentials():
             "events": ["run_failed", "run_regressed"],
         }, headers=headers)
         assert preferences.status_code == 200, preferences.text
-        assert preferences.json()["delivery_status"] == "configured"
+        assert preferences.json()["delivery_status"] == "preferences_saved_delivery_unavailable"
 
         console = client.get("/workspace/admin-console", headers=headers)
         assert console.status_code == 200, console.text
@@ -46,7 +46,7 @@ def test_owner_admin_console_combines_account_operations_without_credentials():
             "enabled": True,
             "recipients": ["ops@example.com"],
             "events": ["run_failed", "run_regressed"],
-            "delivery_status": "configured",
+            "delivery_status": "preferences_saved_delivery_unavailable",
         }
         assert all("api_key" not in str(connection) for connection in data["provider_connections"])
         actions = {event["action"] for event in data["audit_events"]}

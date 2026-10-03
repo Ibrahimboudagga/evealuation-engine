@@ -567,6 +567,8 @@ class QueueWorker:
                 values = {key: getattr(record, key) for key in (
                     "dataset_id", "dataset_version_id", "project_id", "is_simulated",
                     "run_configuration_json", "configuration_verified", "max_attempts")}
+                if kind == "evaluation_run":
+                    values["release_policy_revision_id"] = record.release_policy_revision_id
                 for key in (("model_name",) if kind == "evaluation_run" else ("model_a_name", "model_b_name")):
                     values[key] = getattr(record, key)
                 record = model(id=str(uuid.uuid4()), parent_run_id=run_id, **values)

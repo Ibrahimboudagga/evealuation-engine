@@ -31,7 +31,9 @@ def build_scenario_tab(session, api_base):
             projects = (await request("GET", "/projects")).json()["projects"]
             suites = (await request("GET", "/scenario-suites")).json()
             runs = (await request("GET", "/scenario-runs")).json()
-            run_choices = [(f"{r['target_build']} · {r['metrics']['decision']} · {r['id'][:8]}", r["id"]) for r in runs]
+            run_choices = [(f"{r['target_build']} · official {r['metrics']['decision']} · "
+                            f"checks {r['metrics'].get('quality_decision', 'inconclusive')} · {r['id'][:8]}", r["id"])
+                           for r in runs]
             return (gr.update(choices=[(f"{p['client_name']} / {p['name']}", p["id"]) for p in projects], value=None),
                     gr.update(choices=[(f"{s['name']} v{s['version']}", s["id"]) for s in suites], value=None),
                     gr.update(choices=run_choices, value=None), gr.update(choices=run_choices, value=None),
@@ -71,7 +73,8 @@ def build_scenario_tab(session, api_base):
                 raise ValueError("Select a run.")
             data = (await request("GET", f"/scenario-runs/{run_id}")).json()
             if decision != "all":
-                data["results"] = [r for r in data["results"] if r["decision"] == decision]
+                data["results"] = [r for r in data["results"]
+                                   if r.get("quality_decision", r["decision"]) == decision]
                 data["result_filter"] = decision
             return data
         except httpx.HTTPStatusError as error:
@@ -149,7 +152,7 @@ def build_scenario_tab(session, api_base):
         with gr.Row():
             selected_run = gr.Dropdown(label="Run to review", choices=[])
             baseline = gr.Dropdown(label="Baseline run", choices=[])
-            decision = gr.Dropdown(label="Example filter", choices=["all", "passed", "regressed", "inconclusive"], value="all")
+            decision = gr.Dropdown(label="Explicit-check result filter", choices=["all", "passed", "regressed", "inconclusive"], value="all")
         with gr.Row():
             review_button = gr.Button("Review checks and evidence")
             compare_button = gr.Button("Compare with baseline")

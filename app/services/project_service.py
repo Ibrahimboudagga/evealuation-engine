@@ -77,9 +77,13 @@ class ProjectService:
             if not project:
                 return False
             for model in (DatasetDB, EvaluationRunDB, PairwiseRunDB):
-                db.query(model).filter(model.project_id == project_id).update(
-                    {"project_id": None}, synchronize_session=False
-                )
+                values = {"project_id": None}
+                if model is EvaluationRunDB:
+                    # Policy revisions are project-owned and are deleted with
+                    # the project. Historical unassigned runs must not retain
+                    # a dangling policy foreign key.
+                    values["release_policy_revision_id"] = None
+                db.query(model).filter(model.project_id == project_id).update(values, synchronize_session=False)
             db.delete(project)
             db.commit()
             return True

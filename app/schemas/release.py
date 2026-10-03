@@ -46,3 +46,13 @@ class ReleaseRules(BaseModel):
         if len(set(names)) != len(names):
             raise ValueError("Release slice names must be unique.")
         return self
+
+
+class ScenarioReleaseRules(BaseModel):
+    """Release thresholds for imported agent/application scenario evidence."""
+
+    model_config = ConfigDict(extra="forbid")
+    coverage_minimum: float = Field(default=1, ge=0, le=1)
+    minimum_valid_cases: int = Field(default=1, ge=1, le=1000)
+    pass_rate_minimum: float = Field(default=1, ge=0, le=1)
+    pass_rate_max_drop: float = Field(default=0, ge=0, le=1)

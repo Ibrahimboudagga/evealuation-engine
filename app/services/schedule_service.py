@@ -22,6 +22,7 @@ from app.providers.factory import ProviderFactory
 from app.runners.eval_runner import EvaluationRunner
 from app.services.operations_service import OperationsService
 from app.services.provider_connection_service import ProviderConnectionService
+from app.services.release_policy_service import ReleasePolicyService, policy_snapshot
 from app.services.usage_service import UsageService
 
 
@@ -37,6 +38,7 @@ class ScheduleService:
         self._connections = ProviderConnectionService()
         self._operations = OperationsService()
         self._usage = UsageService()
+        self._release_policies = ReleasePolicyService()
 
     def create(
         self,
@@ -133,6 +135,10 @@ class ScheduleService:
 
     def _build_runner(self, schedule: EvaluationScheduleDB, template: EvaluationTemplateDB) -> EvaluationRunner:
         settings = template.settings
+        with get_db() as db:
+            dataset = db.query(DatasetDB).filter(DatasetDB.id == schedule.dataset_id).first()
+            project_id = dataset.project_id if dataset else None
+        approved_policy = self._release_policies.latest_approved(project_id, "model")
         candidate, candidate_connection = self._provider(
             schedule.workspace_id, settings["candidate_connection_id"], settings.get("candidate_model")
         )
@@ -157,10 +163,11 @@ class ScheduleService:
             "judge_prompt_template": settings.get("judge_prompt_template"),
             "evaluator_settings": settings.get("evaluator_settings") or {},
             "template_execution": {"timeout_seconds": settings.get("timeout_seconds", 60.0)},
-            "release_rules": settings.get("release_rules") or {
+            "release_rules": approved_policy.rules if approved_policy else settings.get("release_rules") or {
                 "coverage_minimum": settings.get("coverage_minimum"),
                 "exact_match_pass_rate_max_drop": settings.get("exact_match_pass_rate_max_drop"),
             },
+            "release_policy": policy_snapshot(approved_policy),
             "report_preferences": settings.get("report_preferences"),
             "schedule_id": schedule.id,
         }

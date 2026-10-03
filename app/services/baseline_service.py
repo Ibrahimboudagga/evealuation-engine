@@ -1,13 +1,14 @@
 """Baseline comparisons gated by pinned measurement contracts and explicit policies."""
 
-from typing import Any, Optional
+from typing import Any
 
 from app.database.connection import get_db
-from app.database.models import EvaluationRunDB
+from app.database.models import EvaluationRunDB, ProjectReleasePolicyRevisionDB
 from app.runners.eval_runner import get_run_metrics
 from app.schemas.outcomes import RunStatus
 from app.schemas.release import ReleaseRules
 from app.services.run_configuration import compatibility_fingerprint
+from app.services.release_policy_service import ReleasePolicyService, policy_snapshot
 
 
 def _delta(current, baseline):
@@ -27,9 +28,7 @@ class BaselineService:
             db.refresh(run)
             return run
 
-    def compare(self, run_id: str, baseline_run_id: str,
-                coverage_minimum: Optional[float] = None,
-                exact_match_pass_rate_max_drop: Optional[float] = None) -> dict[str, Any]:
+    def compare(self, run_id: str, baseline_run_id: str) -> dict[str, Any]:
         if run_id == baseline_run_id:
             raise ValueError("A run cannot be compared with itself.")
         with get_db() as db:
@@ -43,18 +42,39 @@ class BaselineService:
                 raise ValueError("Runs from different agency projects cannot be compared")
             current_config = current.run_configuration or {}
             baseline_config = baseline.run_configuration or {}
-            saved = dict((current_config.get('request') or {}).get('release_rules') or {})
+            release_policy = {"governance_verified": False, "scope": "local_unmanaged"}
+            governance_error = None
+            revision = None
+            if current.project_id:
+                revision = db.get(ProjectReleasePolicyRevisionDB, current.release_policy_revision_id) \
+                    if current.release_policy_revision_id else None
+                if (not revision or revision.project_id != current.project_id
+                        or revision.policy_type != "model"
+                        or not revision.approved_at or not revision.approved_by_user_id):
+                    governance_error = "The current run is not bound to an owner-approved project release policy."
+                    saved = dict((current_config.get('request') or {}).get('release_rules') or {})
+                elif not ReleasePolicyService.verify_revision(revision):
+                    governance_error = "The bound release policy revision failed its integrity check."
+                    saved = dict((current_config.get('request') or {}).get('release_rules') or {})
+                else:
+                    saved = dict(revision.rules)
+                    release_policy = policy_snapshot(revision)
+                    configured_snapshot = (current_config.get('request') or {}).get('release_policy') or {}
+                    if configured_snapshot.get('id') != revision.id or configured_snapshot.get('sha256') != revision.rules_sha256:
+                        governance_error = "The run configuration does not match its bound release policy revision."
+            else:
+                saved = dict((current_config.get('request') or {}).get('release_rules') or {})
             # Older templates used nullable legacy fields; their nulls mean defaults.
             if saved.get('coverage_minimum') is None:
                 saved.pop('coverage_minimum', None)
-            if coverage_minimum is not None:
-                saved['coverage_minimum'] = coverage_minimum
-            if exact_match_pass_rate_max_drop is not None:
-                saved['exact_match_pass_rate_max_drop'] = exact_match_pass_rate_max_drop
             policy = ReleaseRules.model_validate(saved)
             rules = policy.model_dump(mode='json')
             response = {'run_id': run_id, 'baseline_run_id': baseline_run_id,
-                        'status': 'inconclusive', 'rules': rules, 'reasons': [], 'comparisons': []}
+                        'status': 'inconclusive', 'rules': rules, 'reasons': [], 'comparisons': [],
+                        'release_policy': release_policy}
+            if governance_error:
+                response['reasons'] = [governance_error]
+                return response
             if current.status != 'completed' or baseline.status != 'completed':
                 response['reasons'] = ['Both the current run and baseline must be completed before a release check can pass.']
                 return response

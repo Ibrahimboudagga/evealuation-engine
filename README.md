@@ -1,6 +1,7 @@
 # Evaluation Engine
 
 [![Tests and deployment smoke](https://github.com/Ibrahimboudagga/evealuation-engine/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/Ibrahimboudagga/evealuation-engine/actions/workflows/tests.yml)
+[![Security gates](https://github.com/Ibrahimboudagga/evealuation-engine/actions/workflows/security.yml/badge.svg?branch=main)](https://github.com/Ibrahimboudagga/evealuation-engine/actions/workflows/security.yml)
 
 **A workspace for agencies to test AI products, explain failures, and make evidence-based release decisions.**
 
@@ -39,14 +40,14 @@ The scenario path evaluates observable behavior against a declared contract. It 
 
 ## Why agencies can use it
 
-- **Client separation.** Workspaces contain client projects, dataset versions, runs, templates, reports, and audit events. Roles include `owner`, `editor`, `viewer`, and project-scoped `client_viewer` access.
+- **Client separation.** Workspaces contain client projects, dataset versions, runs, templates, reports, and audit events. Roles include `owner`, `editor`, `viewer`, and project-scoped `client_viewer` access. Membership changes cannot remove or demote the final owner.
 - **Reproducible run records.** Each run stores the dataset version, candidate and judge settings, prompt or rubric, evaluator configuration, timeout, release rules, and simulation status.
 - **Credential isolation.** Owners configure encrypted workspace provider connections once. Run requests and reports reference connection IDs and never return stored API keys.
 - **Explicit simulation.** Mock behavior requires an explicit mock/demo selection, and every affected run and report is visibly marked simulated.
 - **Failure-aware scoring.** Candidate failures become `generation_error`; judge or parser failures become `evaluation_error`. Neither is converted into an ordinary low score, loss, or tie.
 - **Operational queue.** The embedded worker claims due runs, retries classified transient failures with backoff and jitter, supports cancellation and retry, dispatches daily or weekly schedules, and reports health.
 - **Transparent client delivery.** Per-example review, CSV/JSON/HTML exports, project dashboards, and expiring revocable share links expose the evidence behind a result.
-- **Release checks.** Compatible runs can be compared with a baseline using coverage, minimum sample size, average score, pass rate, evaluator-specific rules, and metadata slices.
+- **Governed release checks.** Owners approve immutable project policy revisions. Future runs bind to the exact revision and comparison-time threshold overrides are rejected. Compatible runs can then be checked using coverage, minimum sample size, average score, pass rate, evaluator-specific rules, and metadata slices.
 - **Pilot controls.** Owners can inspect members, projects, templates, provider connections, usage, trial/billing metadata, worker health, notification preferences, activation milestones, and audit history from one console.
 
 ## How it works
@@ -126,9 +127,10 @@ Open [http://127.0.0.1:7860](http://127.0.0.1:7860). API documentation is availa
 2. In **Sign In**, enter the owner credentials.
 3. In **Provider Connections**, create a connection named `Demo`, choose provider `mock`, use model `mock`, and enter `mock` in the API-key field. The value is stored encrypted and the resulting runs are marked simulated.
 4. In **Agency Admin Console** or **Projects**, select **Seed Agency Demo**. This creates a sample client project and two versioned datasets.
-5. In **Run Evaluation**, refresh the datasets and connections, choose the demo connection for both candidate and judge, and submit.
-6. Use **View Results** and **Review Results** to inspect status, coverage, scores, explanations, and errors.
-7. Use **Client Reports** to export the result. Mark a completed run as a baseline in **Release Checks**, then compare a later run.
+5. In **Projects → Governed release policy**, select the seeded project, create a `model` draft with `{"coverage_minimum":1.0,"minimum_valid_cases":3,"evaluators":{"exact_match":{"pass_rate_max_drop":0.05}}}`, copy the returned revision ID, and approve it as the owner.
+6. In **Run Evaluation**, refresh the datasets and connections, choose the demo connection for both candidate and judge, and submit.
+7. Use **View Results** and **Review Results** to inspect status, coverage, scores, explanations, and errors.
+8. Use **Client Reports** to export the result. Mark a completed run as a baseline in **Release Checks**, then run the same dataset again and compare it. The simulated runs remain labeled; the approved revision makes the release decision governed rather than legacy/unmanaged.
 
 For the shortest local engine check, run the sample dataset directly:
 
@@ -202,7 +204,9 @@ Run states and result outcomes are separate:
 | `evaluation_error` | The judge or evaluator did not produce a valid measurement |
 | `unverified` | Historical evidence cannot safely be classified as a verified result |
 
-Release comparisons return `passed`, `regressed`, or `inconclusive`. A comparison becomes inconclusive when contracts are incompatible, coverage is insufficient, there are too few valid cases, or required metrics are unavailable. Configuration snapshots include evaluator code fingerprints and backend details so silent scorer drift is visible.
+Release comparisons return `passed`, `regressed`, or `inconclusive`. Workspace/project comparisons require an owner-approved immutable policy bound at run submission; legacy runs without that binding are inconclusive. A comparison also becomes inconclusive when contracts are incompatible, coverage is insufficient, there are too few valid cases, or required metrics are unavailable. Configuration snapshots include the policy ID/hash plus evaluator code fingerprints and backend details so threshold shopping and silent scorer drift are visible.
+
+Scenario comparisons expose `quality_decision` separately from the official `decision`. Imported evidence may analytically pass or regress, but its official decision remains `inconclusive` while provenance is unverified.
 
 ## Providers and credentials
 
@@ -239,7 +243,7 @@ The Gradio UI covers initial setup, individual sign-in, account administration, 
 
 ## CI/CD
 
-GitHub Actions validates pull requests with the full Python 3.11/3.12/3.14 test matrix, a PostgreSQL 16 migration and backup/restore rehearsal, and a startup probe of the production Compose stack. After those gates pass, pushes to `main` and `v*` tags build and smoke-test an exact container digest before promoting it with an SBOM, build provenance, and an artifact attestation in GitHub Container Registry. Pull requests have read-only permissions and cannot publish packages.
+GitHub Actions validates pull requests with the full Python 3.11/3.12/3.14 test matrix, a PostgreSQL 16 migration and backup/restore rehearsal, and a startup probe of the production Compose stack. A separate security gate runs CodeQL, `pip-audit`, full-history Gitleaks, and Trivy filesystem/container scans. After the delivery gates pass, pushes to `main` and `v*` tags build and smoke-test an exact container digest before promoting it with an SBOM, build provenance, and an artifact attestation in GitHub Container Registry. Pull requests have read-only permissions and cannot publish packages.
 
 See [CI_CD.md](CI_CD.md) for image tags, release steps, branch protection, required GitHub settings, and the contract for adding a hosting-specific deployment stage.
 
@@ -256,6 +260,7 @@ Set these values before starting:
 - `POSTGRES_PASSWORD` — use a long URL-safe value because Compose inserts it into `DATABASE_URL`;
 - `WORKSPACE_ENCRYPTION_KEY` — generate once with `Fernet.generate_key()` and retain it;
 - `BOOTSTRAP_SECRET` — required by the production setup wizard.
+- `AUTH_THROTTLE_SECRET` — an independent random value of at least 32 characters used to HMAC persistent sign-in throttle keys.
 
 Then run:
 
@@ -283,7 +288,7 @@ Focused scenario checks:
 .\.venv\Scripts\python.exe -m pytest tests/test_scenarios.py tests/test_scenario_trace.py tests/test_scenario_redaction.py tests/test_workspace_scenarios.py -q --basetemp=.pytest_tmp/scenarios
 ```
 
-CI runs the suite on Python 3.11, 3.12, and 3.14, starts PostgreSQL 16, applies migrations, executes a mock run, creates a database backup, restores it into a second database, and compares row counts and content hashes.
+CI runs the suite on Python 3.11, 3.12, and 3.14, starts PostgreSQL 16, applies migrations, executes a mock run, creates a database backup, restores it into a second database, compares row counts and content hashes, and applies separate source/dependency/secret/container security gates.
 
 ## Project map
 
@@ -323,9 +328,13 @@ This is a strong controlled-pilot foundation, with several deliberate boundaries
 
 - the execution queue is single-process and is not a distributed worker system;
 - notification preferences are stored, but email and Slack delivery adapters are not implemented;
+- local password sign-in is persistently throttled, but invitations, verified password recovery, MFA, and external SSO are not implemented;
 - billing fields and usage snapshots support manual pilots, but there is no payment-provider integration or billable provider-attempt ledger;
 - scenario imports cannot independently prove that evidence came from the claimed deployment;
+- owner-controlled retention now removes old run/result/scenario evidence and an explicit confirmed project purge removes project customer data; active dataset versions, workspace-scoped templates, CLI output directories, and external backups remain separately managed;
+- tenant checks are enforced by the application; PostgreSQL row-level security is not yet configured;
 - hosted model aliases and downloaded embedding weights require operator-controlled pinning for strict reproducibility;
+- dependency lower bounds and base image tags are still not a fully hashed, digest-pinned reproducible supply chain;
 - production acceptance still requires deployment-specific proxy, browser-isolation, backup, restore, and real-provider exercises;
 - the repository does not currently include a license file, so redistribution and commercial-use terms have not been granted.
 

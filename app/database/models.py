@@ -19,6 +19,10 @@ class WorkspaceDB(Base):
     slug: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     retention_days: Mapped[int] = mapped_column(Integer, default=365, nullable=False)
+    content_retention_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    legal_hold_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    legal_hold_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    last_retention_applied_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     plan: Mapped[str] = mapped_column(String(50), default="pilot", nullable=False)
     billing_status: Mapped[str] = mapped_column(String(50), default="trial", nullable=False)
     trial_ends_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
@@ -95,6 +99,23 @@ class UserSessionDB(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     user: Mapped[UserDB] = relationship(back_populates="sessions")
+
+
+class AuthThrottleDB(Base):
+    """Persistent, privacy-minimized failed sign-in counter.
+
+    The primary key is an HMAC of the normalized email address, so attempts for
+    unknown identities can be throttled without storing another copy of the
+    submitted address.
+    """
+
+    __tablename__ = "auth_throttles"
+
+    subject_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    failure_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    window_started_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    locked_until: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
 
 class ProviderConnectionDB(Base):
@@ -304,6 +325,9 @@ class ProjectDB(Base):
     datasets: Mapped[list["DatasetDB"]] = relationship(back_populates="project")
     evaluation_runs: Mapped[list["EvaluationRunDB"]] = relationship(back_populates="project")
     pairwise_runs: Mapped[list["PairwiseRunDB"]] = relationship(back_populates="project")
+    release_policy_revisions: Mapped[list["ProjectReleasePolicyRevisionDB"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan"
+    )
     workspace: Mapped[Optional[WorkspaceDB]] = relationship(back_populates="projects")
 
     @property
@@ -318,6 +342,37 @@ class ProjectDB(Base):
     @tags.setter
     def tags(self, val: List[str]) -> None:
         self.tags_json = json.dumps(val) if val else None
+
+
+class ProjectReleasePolicyRevisionDB(Base):
+    """Immutable release policy revision; approval activates a revision."""
+
+    __tablename__ = "project_release_policy_revisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id", "policy_type", "version_number",
+            name="uq_project_release_policy_revision",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(36), ForeignKey("workspaces.id"), nullable=False)
+    project_id: Mapped[str] = mapped_column(String(36), ForeignKey("projects.id"), nullable=False)
+    policy_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    rules_json: Mapped[str] = mapped_column(Text, nullable=False)
+    rules_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    change_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_by_user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    approved_by_user_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("users.id"), nullable=True)
+    approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    project: Mapped[ProjectDB] = relationship(back_populates="release_policy_revisions")
+
+    @property
+    def rules(self) -> Dict[str, Any]:
+        return json.loads(self.rules_json)
 
 
 class DatasetDB(Base):
@@ -394,6 +449,9 @@ class EvaluationRunDB(Base):
     dataset_id: Mapped[str] = mapped_column(String(255), ForeignKey("datasets.id"), nullable=False)
     dataset_version_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("dataset_versions.id"), nullable=True)
     project_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("projects.id"), nullable=True)
+    release_policy_revision_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("project_release_policy_revisions.id"), nullable=True
+    )
     model_name: Mapped[str] = mapped_column(String(255), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     status: Mapped[str] = mapped_column(String(20), default=RunStatus.QUEUED.value, nullable=False)
@@ -564,6 +622,9 @@ class ScenarioRunDB(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     workspace_id: Mapped[str] = mapped_column(String(36), ForeignKey("workspaces.id"), nullable=False)
     project_id: Mapped[str] = mapped_column(String(36), ForeignKey("projects.id"), nullable=False)
+    release_policy_revision_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("project_release_policy_revisions.id"), nullable=True
+    )
     suite_id: Mapped[str] = mapped_column(String(36), ForeignKey("scenario_suites.id"), nullable=False)
     target_build: Mapped[str] = mapped_column(String(255), nullable=False)
     is_simulated: Mapped[bool] = mapped_column(Boolean, nullable=False)

@@ -256,7 +256,7 @@ class NotificationSettingsRequest(BaseModel):
 
 
 class NotificationSettingsResponse(NotificationSettingsRequest):
-    delivery_status: Literal["configured", "not_configured"]
+    delivery_status: Literal["preferences_saved_delivery_unavailable", "not_configured"]
 
 
 class AdminConsoleResponse(BaseModel):
@@ -324,15 +324,40 @@ class AuditEventsResponse(BaseModel):
 
 class RetentionSettingsRequest(BaseModel):
     retention_days: int = Field(..., ge=30, le=3650)
+    content_retention_enabled: Optional[bool] = None
+    legal_hold: Optional[bool] = None
+    legal_hold_reason: Optional[str] = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def require_legal_hold_reason(self):
+        if self.legal_hold is True and self.legal_hold_reason is not None and not self.legal_hold_reason.strip():
+            raise ValueError("A legal-hold reason cannot be blank.")
+        return self
 
 
 class RetentionSettingsResponse(BaseModel):
     retention_days: int
+    content_retention_enabled: bool
+    legal_hold: bool
+    legal_hold_reason: Optional[str] = None
+    last_retention_applied_at: Optional[datetime] = None
 
 
 class RetentionApplyResponse(BaseModel):
     expired_share_links_deleted: int
     audit_events_deleted: int
+    evaluation_results_deleted: int = 0
+    evaluation_runs_deleted: int = 0
+    pairwise_comparisons_deleted: int = 0
+    pairwise_runs_deleted: int = 0
+    scenario_shares_deleted: int = 0
+    scenario_runs_deleted: int = 0
+    scenario_suites_deleted: int = 0
+    run_attempts_deleted: int = 0
+    dataset_versions_deleted: int = 0
+    content_retention_enabled: bool
+    legal_hold: bool
+    cutoff: datetime
 
 
 class HealthResponse(BaseModel):
@@ -440,6 +465,7 @@ class RunComparisonResponse(BaseModel):
     rules: Dict[str, Any]
     reasons: List[str] = Field(default_factory=list)
     comparisons: List[EvaluatorBaselineComparison] = Field(default_factory=list)
+    release_policy: Dict[str, Any] = Field(default_factory=dict)
 
 
 class DemoSeedResponse(BaseModel):
@@ -508,6 +534,26 @@ class ProjectResponse(BaseModel):
     updated_at: datetime
 
 
+class ReleasePolicyRevisionCreateRequest(BaseModel):
+    policy_type: Literal["model", "scenario"]
+    rules: Dict[str, Any]
+    change_note: Optional[str] = Field(default=None, max_length=2000)
+
+
+class ReleasePolicyRevisionResponse(BaseModel):
+    id: str
+    project_id: str
+    policy_type: Literal["model", "scenario"]
+    version_number: int
+    rules: Dict[str, Any]
+    rules_sha256: str
+    change_note: Optional[str] = None
+    created_by_user_id: str
+    created_at: datetime
+    approved_by_user_id: Optional[str] = None
+    approved_at: Optional[datetime] = None
+
+
 class ProjectsListResponse(BaseModel):
     projects: List[ProjectResponse]
 
@@ -515,6 +561,18 @@ class ProjectsListResponse(BaseModel):
 class ProjectDeleteResponse(BaseModel):
     message: str
     id: str
+
+
+class ProjectDataDeletionRequest(BaseModel):
+    confirm_project_name: str = Field(..., min_length=1, max_length=255)
+
+
+class ProjectDataDeletionResponse(BaseModel):
+    project_id: str
+    project_name: str
+    counts: Dict[str, int]
+    preview: bool
+    legal_hold: bool
 
 
 class DatasetResponse(BaseModel):

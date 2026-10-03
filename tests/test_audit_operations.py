@@ -26,6 +26,9 @@ def test_audit_events_retention_controls_and_health_are_available():
         retention = client.put("/operations/retention", json={"retention_days": 90}, headers=headers)
         assert retention.status_code == 200
         assert retention.json()["retention_days"] == 90
+        assert retention.json()["content_retention_enabled"] is False
         applied = client.post("/operations/retention/apply", headers=headers)
         assert applied.status_code == 200
-        assert set(applied.json()) == {"expired_share_links_deleted", "audit_events_deleted"}
+        assert applied.json()["content_retention_enabled"] is False
+        assert applied.json()["evaluation_runs_deleted"] == 0
+        assert applied.json()["audit_events_deleted"] >= 0

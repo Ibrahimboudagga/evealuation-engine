@@ -71,13 +71,27 @@ def suite_payload(suite, include_content=False):
 
 
 def run_payload(run, include_results=True):
+    configuration = json.loads(run.configuration_json)
+    metrics = json.loads(run.metrics_json)
+    imported_unverified = (
+        configuration.get("evidence_source") == "imported"
+        and configuration.get("provenance_verified") is False
+    )
+    if imported_unverified:
+        metrics["quality_decision"] = metrics.get("quality_decision", metrics.get("decision", "inconclusive"))
+        metrics["decision"] = "inconclusive"
     data = {key: getattr(run, key) for key in
             ("id", "project_id", "suite_id", "target_build", "is_simulated", "created_at", "finished_at")}
     data.update(status="completed", evidence_source="imported",
-                provenance_verified=False, metrics=json.loads(run.metrics_json),
-                configuration=json.loads(run.configuration_json))
+                provenance_verified=False, metrics=metrics,
+                configuration=configuration)
     if include_results:
-        data["results"] = json.loads(run.results_json)
+        results = json.loads(run.results_json)
+        if imported_unverified:
+            for result in results:
+                result["quality_decision"] = result.get("quality_decision", result.get("decision", "inconclusive"))
+                result["decision"] = "inconclusive"
+        data["results"] = results
     return data
 
 
@@ -105,7 +119,7 @@ class ScenarioService:
             db.refresh(suite)
             return suite_payload(suite, True)
 
-    def import_evidence(self, context, suite, target_build, evidence, policy):
+    def import_evidence(self, context, suite, target_build, evidence, policy, release_policy=None):
         scenarios = [Scenario.model_validate(s) for s in json.loads(suite.content_json)]
         if set(evidence) - {s.id for s in scenarios}:
             raise ValueError("Evidence contains IDs outside the pinned scenario suite.")
@@ -130,11 +144,17 @@ class ScenarioService:
         # Completeness is mandatory, even when a lower policy coverage threshold is configured.
         if metrics["valid_evaluations"] < policy["minimum_valid_cases"]:
             metrics["decision"] = "inconclusive"
+        metrics["quality_decision"] = metrics["decision"]
+        metrics["decision"] = "inconclusive"
         configuration = {"schema_version": 1, "suite_sha256": suite.sha256,
             "suite_version": suite.version, "evaluator_sha256": evaluator_identity(),
             "target_build": target_build, "evidence_source": "imported",
-            "provenance_verified": False, "release_rules": policy}
+            "provenance_verified": False, "release_rules": policy,
+            "release_policy": release_policy or {"governance_verified": False}}
         original_results = [r.model_dump(mode="json") for r in results]
+        for result in original_results:
+            result["quality_decision"] = result["decision"]
+            result["decision"] = "inconclusive"
         retained_results = redact(original_results)
         was_redacted = retained_results != original_results
         configuration["redaction"] = {"applied": was_redacted, "scores_use_original_observations": True,
@@ -142,6 +162,7 @@ class ScenarioService:
         result_json = encoded(retained_results)
         run = ScenarioRunDB(id=str(uuid.uuid4()), workspace_id=context.workspace_id,
             project_id=suite.project_id, suite_id=suite.id, target_build=target_build,
+            release_policy_revision_id=(release_policy or {}).get("id"),
             is_simulated=any(r.simulated for r in results), configuration_json=encoded(configuration),
             results_json=result_json, metrics_json=encoded(metrics), created_at=started, finished_at=now())
         UsageService().assert_capacity(context.workspace_id, runs=1,
@@ -173,28 +194,37 @@ class ScenarioService:
             reasons.append("Per-case simulation modes differ.")
         for label, report in (("Run", current), ("Baseline", previous)):
             metrics = report["metrics"]
+            quality = metrics.get("quality_decision", metrics["decision"])
             if metrics["valid_evaluations"] < policy["minimum_valid_cases"]:
                 reasons.append(f"{label} has too few valid cases.")
-            if metrics["coverage"] < policy["coverage_minimum"] or metrics["decision"] == "inconclusive":
+            if metrics["coverage"] < policy["coverage_minimum"] or quality == "inconclusive":
                 reasons.append(f"{label} has incomplete evidence.")
             if metrics["pass_rate"] is None:
                 reasons.append(f"{label} has no quality score.")
-        decision = "inconclusive"
+        quality_decision = "inconclusive"
         if not reasons:
             drop = previous["metrics"]["pass_rate"] - current["metrics"]["pass_rate"]
-            decision = "regressed" if (current["metrics"]["decision"] == "regressed" or
+            current_quality = current["metrics"].get("quality_decision", current["metrics"]["decision"])
+            quality_decision = "regressed" if (current_quality == "regressed" or
                 current["metrics"]["pass_rate"] < policy["pass_rate_minimum"] or
                 drop > policy["pass_rate_max_drop"] + 1e-12) else "passed"
-            reasons = ["Explicit scenario checks failed or a release threshold was breached."] if decision == "regressed" else [
+            reasons = ["Explicit scenario checks failed or a release threshold was breached."] if quality_decision == "regressed" else [
                 "All explicit checks and configured release thresholds passed."]
-        return {"run_id": run.id, "baseline_run_id": baseline.id, "decision": decision,
+        release_policy = config.get("release_policy") or {"governance_verified": False}
+        if not release_policy.get("governance_verified"):
+            reasons.append("No owner-approved project scenario policy is bound to this run.")
+        reasons.append("Imported evidence provenance is not independently verified.")
+        return {"run_id": run.id, "baseline_run_id": baseline.id, "decision": "inconclusive",
+            "quality_decision": quality_decision,
             "reasons": reasons, "rules": policy, "current": current["metrics"],
-            "baseline": previous["metrics"], "provenance_verified": False}
+            "baseline": previous["metrics"], "provenance_verified": False,
+            "release_policy": release_policy}
 
     def html(self, run, project, comparison=None):
         payload = run_payload(run)
         manifest = {"run_id": run.id, "status": "completed", "target_label": run.target_build,
-                    "simulated": run.is_simulated, "metrics": payload["metrics"]}
+                    "simulated": run.is_simulated, "metrics": payload["metrics"],
+                    "provenance_verified": False}
         results = [ScenarioResult.model_validate(item) for item in payload["results"]]
         document = render_report(manifest, results)
         note = ("<p><strong>Imported evidence — target execution and provenance are not independently verified.</strong></p>"

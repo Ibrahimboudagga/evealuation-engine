@@ -12,11 +12,16 @@ def render_report(manifest, results):
     for result in results:
         checks = "".join(f"<li>{esc(c.name)}: <strong>{esc(c.status)}</strong> — {esc(c.explanation)}</li>" for c in result.checks)
         output = json.dumps(result.evidence.output, indent=2, ensure_ascii=False) if result.evidence else "No output"
-        rows.append(f"<section><h2>{esc(result.scenario_id)}</h2><p>{esc(result.outcome)} / {esc(result.decision)}"
+        decision = (f"official {result.decision} / explicit checks {result.quality_decision}"
+                    if result.quality_decision else result.decision)
+        rows.append(f"<section><h2>{esc(result.scenario_id)}</h2><p>{esc(result.outcome)} / {esc(decision)}"
                     f" — {'SIMULATED' if result.simulated else 'LIVE TARGET'}</p>"
                     f"<p>{esc(result.error_message or '')}</p><ul>{checks}</ul><details><summary>Output</summary>"
                     f"<pre>{esc(output)}</pre></details></section>")
     metrics = esc(json.dumps(manifest["metrics"], indent=2))
+    provenance_note = ("<p><strong>Official release decision: inconclusive. Imported evidence provenance "
+                       "is not independently verified.</strong></p>"
+                       if manifest.get("provenance_verified") is False else "")
     return ("<!doctype html><html lang='en'><meta charset='utf-8'>"
             "<meta name='viewport' content='width=device-width,initial-scale=1'>"
             "<meta http-equiv='Content-Security-Policy' content=\"default-src 'none'; style-src 'unsafe-inline'\">"
@@ -24,6 +29,7 @@ def render_report(manifest, results):
             "section{border-top:1px solid #ddd;padding:16px 0}pre{white-space:pre-wrap;overflow-wrap:anywhere}</style>"
             f"<h1>Scenario evaluation {'— SIMULATED' if manifest['simulated'] else ''}</h1>"
             f"<p>Run {esc(manifest['run_id'])} · {esc(manifest['status'])} · {esc(manifest['target_label'])}</p>"
+            + provenance_note +
             "<p>Coverage denominator: all expected cases. Average score and pass rate denominator: valid evaluations. "
             "Scores measure explicit checks only; they are not a general judgment of correctness.</p>"
             f"<pre>{metrics}</pre>" + "".join(rows) + "</html>")
