@@ -313,6 +313,7 @@ tests/          Unit, integration, migration, security, and workflow tests
 | Document | Use it for |
 | --- | --- |
 | [DEMO_GUIDE.md](DEMO_GUIDE.md) | The short agency mock demonstration |
+| [PILOT_PRODUCT_SCOPE.md](PILOT_PRODUCT_SCOPE.md) | First paid-pilot buyer, workflow, inputs, outputs, claims, and data boundary |
 | [SCENARIO_EVALUATION.md](SCENARIO_EVALUATION.md) | Scenario schema, trace contracts, adapters, and reference projects |
 | [PROJECT_DEEP_DIVE.md](PROJECT_DEEP_DIVE.md) | Detailed system architecture and feature inventory |
 | [PROJECT_DOCUMENTATION.md](PROJECT_DOCUMENTATION.md) | Extended API and implementation documentation |

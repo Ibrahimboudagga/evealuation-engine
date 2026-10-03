@@ -1,0 +1,4 @@
+{"id":"clear-pass","human_label":"pass","judge_labels":["pass","pass","pass"],"group":"direct"}
+{"id":"clear-fail","human_label":"fail","judge_labels":["fail","fail","fail"],"group":"direct"}
+{"id":"style-bias-edge","human_label":"pass","judge_labels":["fail","pass","fail"],"group":"concise"}
+{"id":"uncertain-edge","human_label":"fail","judge_labels":["fail","fail","fail"],"group":"ambiguous"}

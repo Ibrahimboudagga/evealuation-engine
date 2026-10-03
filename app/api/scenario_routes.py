@@ -24,6 +24,10 @@ class SuiteUpload(StrictRequest):
     content: str = Field(min_length=1, max_length=5_000_000)
 
 
+class SuitePreview(StrictRequest):
+    content: str = Field(min_length=1, max_length=5_000_000)
+
+
 class EvidenceUpload(StrictRequest):
     suite_id: str
     target_build: str = Field(min_length=1, max_length=255)
@@ -74,10 +78,17 @@ def register_scenario_routes(app, auth_dependency, project_access):
             return service.create_suite(context, req.project_id, req.name, req.content)
         except WorkspaceLimitExceeded as error:
             raise HTTPException(429, str(error))
-        except (ValidationError, ValueError):
-            raise HTTPException(422, "Invalid suite. Use 1–1000 unique scenario IDs and the documented scenario schema.")
+        except ValidationError:
+            raise HTTPException(422, "Invalid suite request.")
+        except ValueError as error:
+            raise HTTPException(422, str(error))
         except IntegrityError:
             raise HTTPException(409, "A suite version was created concurrently. Retry the upload.")
+
+    @app.post("/scenario-suites/preview")
+    def preview_suite(req: SuitePreview, context=Depends(auth_dependency)):
+        require_context(context)
+        return service.preview_suite(req.content)
 
     @app.get("/scenario-suites")
     def list_suites(project_id: str | None = None, context=Depends(auth_dependency)):

@@ -2,7 +2,7 @@
 
 import math
 
-from app.scenarios.schemas import CheckResult, Evidence, Scenario, ScenarioResult
+from app.scenarios.schemas import CheckResult, DimensionResult, Evidence, Scenario, ScenarioResult
 from app.scenarios.assertions import assert_value, resolve_pointer
 from app.scenarios.trace import evaluate_trace
 from app.scenarios.revenue_ops import evaluate_revenue_ops
@@ -63,9 +63,31 @@ def evaluate(scenario: Scenario, evidence: Evidence) -> ScenarioResult:
                   "Total subtask time must fit the available hours")
             ranks = [{"high": 0, "medium": 1, "low": 2}[t["priority"]] for t in tasks]
             check("schedule_priority", ranks == sorted(ranks), "Tasks must be ordered by priority")
+    def dimension(names):
+        selected = [c for c in checks if names(c.name)]
+        verified = [c for c in selected if c.status != "unverified"]
+        if not selected or len(verified) != len(selected):
+            return DimensionResult(status="inconclusive", score=None,
+                evaluated_checks=len(verified), total_checks=len(selected),
+                evidence_checks=[c.name for c in selected])
+        score = sum(c.status == "passed" for c in verified) / len(verified)
+        return DimensionResult(status="passed" if score == 1 else "failed", score=score,
+            evaluated_checks=len(verified), total_checks=len(selected),
+            evidence_checks=[c.name for c in selected])
+
+    safety_names = lambda name: name.startswith("forbidden_tool:") or name.startswith("side_effect")
+    dimensions = {
+        "task_outcome": dimension(lambda name: name.startswith(("state:", "grounding_claim:", "schedule_", "revenue_"))
+                                  or name in {a.name for a in scenario.assertions}),
+        "trajectory": dimension(lambda name: name.startswith(("tool:", "required_tool:", "tool_order",
+                                                               "retrieval_", "citation:", "turn:"))),
+        "safety": dimension(safety_names),
+        "operational": dimension(lambda name: name.endswith("_budget") or name == "tool_call_budget"),
+    }
     incomplete = any(c.status == "unverified" for c in checks)
     score = None if incomplete else sum(c.status == "passed" for c in checks) / len(checks)
     return ScenarioResult(scenario_id=scenario.id, outcome="evaluation_error" if incomplete else "evaluated",
                           decision="inconclusive" if incomplete else "passed" if score == 1 else "regressed",
                           score=score, simulated=evidence.simulated, evidence=evidence, checks=checks,
+                          dimensions=dimensions,
                           error_message="Required evidence is unavailable" if incomplete else None)

@@ -1,6 +1,6 @@
 """Versioned application execution and typed observable-evidence contracts."""
 
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -188,9 +188,50 @@ class ToolCall(StrictModel):
     name: str = Field(min_length=1)
     status: Literal["succeeded", "failed"]
     call_id: str | None = None
+    step_id: str | None = None
+    parent_step_id: str | None = None
     sequence: int | None = Field(default=None, ge=0)
     arguments: dict[str, Any] | None = None
     result: ObservedValue | None = None
+    error: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    latency_ms: float | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def validate_timing(self):
+        if self.started_at and self.finished_at and self.finished_at < self.started_at:
+            raise ValueError("Tool call finished_at cannot precede started_at")
+        if self.parent_step_id and not self.step_id:
+            raise ValueError("A parent step requires a step ID")
+        return self
+
+
+class TargetIdentity(StrictModel):
+    provider: str | None = None
+    model: str | None = None
+    model_version: str | None = None
+    application_version: str | None = None
+    prompt_template_version: str | None = None
+    parameters: dict[str, Any] = Field(default_factory=dict)
+
+
+class UsageEvidence(StrictModel):
+    prompt_tokens: int | None = Field(default=None, ge=0)
+    completion_tokens: int | None = Field(default=None, ge=0)
+    total_tokens: int | None = Field(default=None, ge=0)
+    cost: float | None = Field(default=None, ge=0)
+    currency: str | None = Field(default=None, min_length=3, max_length=3)
+    cost_basis: Literal["measured", "estimated"] | None = None
+
+    @model_validator(mode="after")
+    def validate_usage(self):
+        if self.total_tokens is not None and self.prompt_tokens is not None and self.completion_tokens is not None:
+            if self.total_tokens != self.prompt_tokens + self.completion_tokens:
+                raise ValueError("total_tokens must equal prompt_tokens plus completion_tokens")
+        if self.cost is not None and (self.currency is None or self.cost_basis is None):
+            raise ValueError("Cost requires currency and measured/estimated cost basis")
+        return self
 
 
 class RetrievedDocument(StrictModel):
@@ -237,8 +278,17 @@ class RevenueOpsEvidence(StrictModel):
 
 
 class Evidence(StrictModel):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[1, 2] = 1
     output: Any
+    source: Literal["fixture", "imported", "live_capture"] = "imported"
+    case_id: str | None = None
+    run_id: str | None = None
+    session_id: str | None = None
+    captured_at: datetime | None = None
+    target: TargetIdentity | None = None
+    evaluator_versions: dict[str, str] = Field(default_factory=dict)
+    human_annotations: dict[str, Any] = Field(default_factory=dict)
+    usage: UsageEvidence | None = None
     # Null means unavailable; [] means an observed empty collection.
     tool_calls: list[ToolCall] | None = Field(default=None, max_length=10000)
     trace_complete: bool = False
@@ -259,10 +309,13 @@ class Evidence(StrictModel):
 
     @model_validator(mode="after")
     def unique_trace_identity(self):
-        for field in ("sequence", "call_id"):
+        for field in ("sequence", "call_id", "step_id"):
             values = [getattr(c, field) for c in self.tool_calls or [] if getattr(c, field) is not None]
             if len(values) != len(set(values)):
                 raise ValueError("Tool call sequence and IDs must be unique")
+        step_ids = {c.step_id for c in self.tool_calls or [] if c.step_id}
+        if any(c.parent_step_id and c.parent_step_id not in step_ids for c in self.tool_calls or []):
+            raise ValueError("Tool-call parent_step_id must reference a step in the same trace")
         for field in ("sequence", "id"):
             values = [getattr(t, field) for t in self.turns or []]
             if len(values) != len(set(values)):
@@ -276,6 +329,14 @@ class CheckResult(StrictModel):
     explanation: str
 
 
+class DimensionResult(StrictModel):
+    status: Literal["passed", "failed", "inconclusive"]
+    score: float | None = Field(default=None, ge=0, le=1)
+    evaluated_checks: int = Field(ge=0)
+    total_checks: int = Field(ge=0)
+    evidence_checks: list[str] = Field(default_factory=list)
+
+
 class ScenarioResult(StrictModel):
     scenario_id: str
     outcome: Literal["evaluated", "generation_error", "evaluation_error"]
@@ -284,5 +345,6 @@ class ScenarioResult(StrictModel):
     score: float | None = None
     simulated: bool
     checks: list[CheckResult] = Field(default_factory=list)
+    dimensions: dict[Literal["task_outcome", "trajectory", "safety", "operational"], DimensionResult] = Field(default_factory=dict)
     error_message: str | None = None
     evidence: Evidence | None = None
