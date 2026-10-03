@@ -12,7 +12,8 @@ RUN apt-get update \
         "pip" "setuptools" "wheel>=0.46.2" "jaraco.context>=6.1.0" \
     && python -m pip install --no-cache-dir -r requirements.txt \
     && python -m pip install --no-cache-dir --upgrade \
-        "setuptools>=78.1.1" "msgpack>=1.2.1" "urllib3>=2.8.0"
+        "setuptools>=78.1.1" "msgpack>=1.2.1" "urllib3>=2.8.0" \
+    && python -m pip uninstall --yes pip setuptools wheel
 COPY . .
 RUN useradd --create-home appuser && chown -R appuser:appuser /app
 USER appuser
