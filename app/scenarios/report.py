@@ -11,12 +11,19 @@ def render_report(manifest, results):
     rows = []
     for result in results:
         checks = "".join(f"<li>{esc(c.name)}: <strong>{esc(c.status)}</strong> — {esc(c.explanation)}</li>" for c in result.checks)
+        dimensions = "".join(
+            f"<li>{esc(name)}: <strong>{esc(value.status)}</strong>"
+            f" — {esc(value.evaluated_checks)}/{esc(value.total_checks)} checks"
+            f" — score {esc(value.score) if value.score is not None else 'unavailable'}</li>"
+            for name, value in result.dimensions.items()
+        )
         output = json.dumps(result.evidence.output, indent=2, ensure_ascii=False) if result.evidence else "No output"
         decision = (f"official {result.decision} / explicit checks {result.quality_decision}"
                     if result.quality_decision else result.decision)
         rows.append(f"<section><h2>{esc(result.scenario_id)}</h2><p>{esc(result.outcome)} / {esc(decision)}"
                     f" — {'SIMULATED' if result.simulated else 'LIVE TARGET'}</p>"
-                    f"<p>{esc(result.error_message or '')}</p><ul>{checks}</ul><details><summary>Output</summary>"
+                    f"<p>{esc(result.error_message or '')}</p><h3>Evaluation dimensions</h3><ul>{dimensions}</ul>"
+                    f"<h3>Evidence checks</h3><ul>{checks}</ul><details><summary>Output</summary>"
                     f"<pre>{esc(output)}</pre></details></section>")
     metrics = esc(json.dumps(manifest["metrics"], indent=2))
     provenance_note = ("<p><strong>Official release decision: inconclusive. Imported evidence provenance "
