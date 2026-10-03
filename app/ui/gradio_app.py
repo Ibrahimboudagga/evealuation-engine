@@ -3,6 +3,7 @@ import httpx
 import os
 import json
 import tempfile
+from uuid import UUID
 from pathlib import Path
 import inspect
 from app.ui.scenario_tab import build_scenario_tab
@@ -11,6 +12,14 @@ from app.ui.session import api_headers as _api_headers, bind_session
 API_BASE = os.getenv("API_BASE", "http://localhost:8000")
 
 PROVIDER_CHOICES = ["openai", "anthropic", "cohere", "gemini", "mock"]
+
+
+def _canonical_uuid(value, label):
+    """Validate untrusted UI identifiers before placing them in API paths."""
+    try:
+        return str(UUID(str(value).strip()))
+    except (AttributeError, TypeError, ValueError):
+        raise ValueError(f"{label} must be a valid identifier.") from None
 
 
 async def submit_run(
@@ -426,6 +435,7 @@ async def list_release_policy_revisions(project_id):
     if not project_id:
         return {"error": "Select a project."}
     try:
+        project_id = _canonical_uuid(project_id, "Project ID")
         async with httpx.AsyncClient(timeout=15.0, headers=_api_headers()) as client:
             response = await client.get(
                 f"{API_BASE}/projects/{project_id}/release-policy-revisions"
@@ -442,11 +452,14 @@ async def create_release_policy_revision(project_id, policy_type, rules_text, ch
     if not project_id:
         return {"error": "Select a project."}
     try:
+        project_id = _canonical_uuid(project_id, "Project ID")
         rules = json.loads(rules_text or "{}")
         if not isinstance(rules, dict):
             return {"error": "Policy rules must be a JSON object."}
     except json.JSONDecodeError as error:
         return {"error": f"Policy rules must be valid JSON: {error.msg}"}
+    except ValueError as error:
+        return {"error": str(error)}
     try:
         async with httpx.AsyncClient(timeout=15.0, headers=_api_headers()) as client:
             response = await client.post(
@@ -467,9 +480,11 @@ async def approve_release_policy_revision(project_id, revision_id):
     if not project_id or not revision_id or not revision_id.strip():
         return {"error": "Select a project and enter a revision ID."}
     try:
+        project_id = _canonical_uuid(project_id, "Project ID")
+        revision_id = _canonical_uuid(revision_id, "Revision ID")
         async with httpx.AsyncClient(timeout=15.0, headers=_api_headers()) as client:
             response = await client.post(
-                f"{API_BASE}/projects/{project_id}/release-policy-revisions/{revision_id.strip()}/approve"
+                f"{API_BASE}/projects/{project_id}/release-policy-revisions/{revision_id}/approve"
             )
             response.raise_for_status()
         return {"message": "Policy revision approved. Future runs bind to this immutable revision.",
