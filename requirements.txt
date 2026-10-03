@@ -12,7 +12,8 @@ gradio>=6.28.0
 httpx>=0.28.1
 pytest>=9.1.1
 pytest-asyncio>=1.4.0
-numpy>=2.5.3
+numpy>=2.4.6,<2.5; python_version < "3.12"
+numpy>=2.5.3; python_version >= "3.12"
 sentence-transformers>=6.1.0
 structlog>=26.1.0
 json_repair>=0.63.5
