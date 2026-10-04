@@ -27,6 +27,34 @@ def load_scenarios(path):
 
 def summarize(results, expected):
     valid = [r for r in results if r.outcome == "evaluated"]
+    evidence = [r.evidence for r in valid if r.evidence is not None]
+    latencies = sorted(item.latency_ms for item in evidence if item.latency_ms is not None)
+    def percentile(values, fraction):
+        if not values:
+            return None
+        index = (len(values) - 1) * fraction
+        lower, upper = math.floor(index), math.ceil(index)
+        return values[lower] if lower == upper else values[lower] + (values[upper] - values[lower]) * (index - lower)
+    costs = {}
+    for item in evidence:
+        if item.usage and item.usage.cost is not None:
+            key = (item.usage.currency, item.usage.cost_basis)
+            costs[key] = costs.get(key, 0) + item.usage.cost
+    usage = {"cases_with_usage": sum(item.usage is not None for item in evidence),
+             "total_tokens": sum((item.usage.total_tokens if item.usage else None) or item.total_tokens or 0 for item in evidence),
+             "cost_totals": [{"currency": currency, "basis": basis, "amount": amount}
+                             for (currency, basis), amount in sorted(costs.items())],
+             "latency_ms": {"count": len(latencies), "p50": percentile(latencies, .5),
+                            "p95": percentile(latencies, .95), "min": min(latencies) if latencies else None,
+                            "max": max(latencies) if latencies else None}}
+    dimensions = {}
+    for name in ("task_outcome", "trajectory", "safety", "operational"):
+        observed = [r.dimensions[name] for r in valid if name in r.dimensions]
+        scored = [item for item in observed if item.score is not None]
+        dimensions[name] = {"valid_cases": len(scored),
+            "coverage": len(scored) / expected if expected else None,
+            "average_score": sum(item.score for item in scored) / len(scored) if scored else None,
+            "pass_rate": sum(item.status == "passed" for item in scored) / len(scored) if scored else None}
     return {"total_expected_cases": expected, "recorded_cases": len(results),
             "valid_evaluations": len(valid),
             "generation_errors": sum(r.outcome == "generation_error" for r in results),
@@ -34,7 +62,8 @@ def summarize(results, expected):
             "coverage": len(valid) / expected if expected else None,
             "average_score": sum(r.score for r in valid) / len(valid) if valid else None,
             "pass_rate": sum(r.decision == "passed" for r in valid) / len(valid) if valid else None,
-            "quality_message": None if valid else "No valid evaluations",
+            "quality_message": None if valid else "No valid evaluations", "usage": usage,
+            "dimensions": dimensions,
             "decision": "inconclusive" if len(valid) != expected else
                         "passed" if all(r.decision == "passed" for r in valid) else "regressed"}
 

@@ -1,0 +1,5 @@
+{
+  "labels": ["pass", "fail"],
+  "pass": "All required observable checks passed.",
+  "fail": "At least one required observable check failed."
+}

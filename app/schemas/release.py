@@ -56,3 +56,11 @@ class ScenarioReleaseRules(BaseModel):
     minimum_valid_cases: int = Field(default=1, ge=1, le=1000)
     pass_rate_minimum: float = Field(default=1, ge=0, le=1)
     pass_rate_max_drop: float = Field(default=0, ge=0, le=1)
+    dimensions: dict[str, EvaluatorReleaseRule] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def known_dimensions(self):
+        allowed = {"task_outcome", "trajectory", "safety", "operational"}
+        if not set(self.dimensions) <= allowed:
+            raise ValueError("Scenario dimension rules contain an unknown dimension")
+        return self

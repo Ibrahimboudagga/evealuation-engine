@@ -17,6 +17,7 @@ def test_canonical_agent_record_preserves_hierarchy_provenance_and_usage():
         "output": {"created": True},
         "target": {"provider": "customer-app", "application_version": "git:abc",
                    "prompt_template_version": "support-v3", "parameters": {"temperature": 0}},
+        "evaluator_versions": {"scenario-engine": "sha256:abc"},
         "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15,
                   "cost": 0.02, "currency": "USD", "cost_basis": "measured"},
         "tool_calls": [
@@ -52,6 +53,27 @@ def test_calibration_reports_agreement_repeatability_groups_and_disagreements():
     assert report["exact_agreement"] == .5 and report["repeatability"] == .5
     assert report["disagreement_count"] == 1 and report["groups"]["a"]["exact_agreement"] == 1
     assert report["uncertainty"]["agreement_denominator"] == 2
+    assert report["release_eligible"] is False and report["exact_agreement_interval"]["lower"] < .5
+
+
+def test_authoritative_v2_rejects_missing_identity_cycles_and_usage_mismatch():
+    base = {"schema_version": 2, "source": "live_capture", "output": {}, "simulated": False}
+    with pytest.raises(ValidationError, match="Authoritative schema-v2"):
+        Evidence.model_validate(base)
+    with pytest.raises(ValidationError, match="precede|cycles"):
+        Evidence(output={}, simulated=False, tool_calls=[
+            {"name": "parent", "status": "succeeded", "step_id": "p", "parent_step_id": "c", "sequence": 1},
+            {"name": "child", "status": "succeeded", "step_id": "c", "parent_step_id": "p", "sequence": 0}])
+    with pytest.raises(ValidationError, match="usage.total_tokens"):
+        Evidence(output={}, simulated=False, total_tokens=4, usage={"total_tokens": 5})
+
+
+def test_cost_budget_is_a_first_class_operational_check():
+    scenario = Scenario(id="cost", task="Stay affordable", max_cost=.01, cost_currency="USD")
+    result = evaluate(scenario, Evidence(output={}, simulated=False,
+        usage={"cost": .02, "currency": "USD", "cost_basis": "measured"}))
+    assert result.decision == "regressed"
+    assert result.dimensions["operational"].status == "failed"
 
 
 def test_suite_preview_returns_actionable_row_and_field_errors():

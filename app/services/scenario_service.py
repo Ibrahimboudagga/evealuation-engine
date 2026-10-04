@@ -252,8 +252,34 @@ class ScenarioService:
             quality_decision = "regressed" if (current_quality == "regressed" or
                 current["metrics"]["pass_rate"] < policy["pass_rate_minimum"] or
                 drop > policy["pass_rate_max_drop"] + 1e-12) else "passed"
-            reasons = ["Explicit scenario checks failed or a release threshold was breached."] if quality_decision == "regressed" else [
-                "All explicit checks and configured release thresholds passed."]
+            dimension_reasons = []
+            for name, rule in policy.get("dimensions", {}).items():
+                current_dimension = current["metrics"]["dimensions"].get(name, {})
+                prior_dimension = previous["metrics"]["dimensions"].get(name, {})
+                if current_dimension.get("average_score") is None or current_dimension.get("pass_rate") is None:
+                    quality_decision = "inconclusive"
+                    dimension_reasons.append(f"Dimension {name} has insufficient evidence.")
+                    continue
+                needs_baseline = rule.get("average_score_max_drop") is not None or rule.get("pass_rate_max_drop") is not None
+                if needs_baseline and (prior_dimension.get("average_score") is None or prior_dimension.get("pass_rate") is None):
+                    quality_decision = "inconclusive"
+                    dimension_reasons.append(f"Baseline dimension {name} has insufficient evidence.")
+                    continue
+                breached = ((rule.get("average_score_minimum") is not None and
+                             current_dimension["average_score"] < rule["average_score_minimum"]) or
+                            (rule.get("pass_rate_minimum") is not None and
+                             current_dimension["pass_rate"] < rule["pass_rate_minimum"]) or
+                            (rule.get("average_score_max_drop") is not None and
+                             prior_dimension.get("average_score") is not None and
+                             prior_dimension["average_score"] - current_dimension["average_score"] > rule["average_score_max_drop"] + 1e-12) or
+                            (rule.get("pass_rate_max_drop") is not None and
+                             prior_dimension.get("pass_rate") is not None and
+                             prior_dimension["pass_rate"] - current_dimension["pass_rate"] > rule["pass_rate_max_drop"] + 1e-12))
+                if breached:
+                    quality_decision = "regressed"
+                    dimension_reasons.append(f"Dimension {name} breached its release threshold.")
+            reasons = dimension_reasons or (["Explicit scenario checks failed or a release threshold was breached."]
+                if quality_decision == "regressed" else ["All explicit checks and configured release thresholds passed."])
         release_policy = config.get("release_policy") or {"governance_verified": False}
         if not release_policy.get("governance_verified"):
             reasons.append("No owner-approved project scenario policy is bound to this run.")

@@ -10,11 +10,30 @@ Evaluation reports keep four dimensions separate: `task_outcome`, `trajectory`, 
 
 Use `POST /scenario-suites/preview` before persistence to receive a ten-case canonical preview plus row and field validation errors. The endpoint does not store the submitted content.
 
-Judge calibration is an offline, versionable measurement step:
+Judge calibration is an offline, versionable measurement step. Bind every release-eligible
+artifact to the exact provider, model version, prompt hash, rubric hash, label set, adjudication
+process, and parameters:
 
 ```powershell
-.\.venv\Scripts\python.exe run_calibration.py datasets\judge_calibration_sample.jsonl --output calibration-report.json
+.\.venv\Scripts\python.exe run_calibration.py datasets\judge_calibration_sample.jsonl --config datasets\judge_calibration_config.json --minimum-cases 30 --minimum-group-cases 10 --output calibration-report.json
 ```
+
+The report includes a stable identity hash, Wilson confidence intervals, human inter-rater
+agreement when multiple human labels are supplied, repeatability, subgroup sample warnings,
+and an explicit `release_eligible` result. Running without `--config` remains useful for
+exploration but produces an unbound artifact that cannot authorize a release.
+
+Authoritative schema-v2 evidence requires case, run, session, capture timestamp, target/build
+identity, and evaluator versions. Tool parents must precede children and cycles are rejected.
+For a staging bridge, configure `HttpAdapter(response_signing_secret=...)`; the target signs
+`<request_id>.<raw-response-body>` with HMAC-SHA256 and returns the digest in
+`X-Evaluation-Signature`. This binds evidence to the submitted request and rejects modified or
+replayed responses. Keep the signing secret in a credential store and use HTTPS.
+
+Scenario contracts can set `max_cost` with `cost_currency`. Reports aggregate latency p50/p95,
+tokens, and measured versus estimated cost separately; currencies are never combined. Release
+policies may set independent thresholds for `task_outcome`, `trajectory`, `safety`, and
+`operational` dimensions.
 
 The report includes exact human/judge agreement, Cohen's kappa, repeated-run stability, group-level agreement, disagreements, and the denominator behind each measurement. Calibration input must be human-labelled and tied operationally to the judge model, prompt, parameters, and rubric version used to produce `judge_labels`.
 
