@@ -1,5 +1,23 @@
 # Evaluating agents and application AI
 
+The supported paid-pilot offer and its claims are defined in [PILOT_PRODUCT_SCOPE.md](PILOT_PRODUCT_SCOPE.md).
+
+## Canonical evidence contract
+
+Evidence schema version 2 records stable case, run, and session IDs; capture source and timestamp; application/provider/model/prompt versions; generation parameters; evaluator versions; human annotations; token and measured-or-estimated cost data; and ordered agent steps. Tool steps can include stable step and parent-step IDs, arguments, results, errors, timestamps, and latency. Parent IDs must resolve inside the same trace, identifiers and sequence numbers must be unique, and invalid timing is rejected. Schema version 1 remains readable for existing fixtures and imports.
+
+Evaluation reports keep four dimensions separate: `task_outcome`, `trajectory`, `safety`, and `operational`. Each dimension lists the evidence checks behind it and becomes inconclusive when required evidence is unavailable. Final-answer checks therefore cannot hide a failed tool trajectory or unauthorized side effect.
+
+Use `POST /scenario-suites/preview` before persistence to receive a ten-case canonical preview plus row and field validation errors. The endpoint does not store the submitted content.
+
+Judge calibration is an offline, versionable measurement step:
+
+```powershell
+.\.venv\Scripts\python.exe run_calibration.py datasets\judge_calibration_sample.jsonl --output calibration-report.json
+```
+
+The report includes exact human/judge agreement, Cohen's kappa, repeated-run stability, group-level agreement, disagreements, and the denominator behind each measurement. Calibration input must be human-labelled and tied operationally to the judge model, prompt, parameters, and rubric version used to produce `judge_labels`.
+
 This extension evaluates observable application output and execution evidence.
 There are now two entry points: the operator CLI executes trusted targets or
 fixtures; the workspace API and Gradio page score uploaded application evidence.

@@ -2,6 +2,7 @@
 
 import asyncio
 import time
+from datetime import datetime, timezone
 from typing import Protocol
 from urllib.parse import quote, urlsplit
 
@@ -30,7 +31,10 @@ class FixtureAdapter:
     async def execute(self, scenario, request_id):
         if scenario.id not in self.fixtures:
             raise ExecutionFailure("No fixture for this scenario")
-        return Evidence.model_validate({**self.fixtures[scenario.id], "simulated": True})
+        return Evidence.model_validate({**self.fixtures[scenario.id], "simulated": True,
+                                        "source": "fixture", "case_id": scenario.id,
+                                        "run_id": request_id.rsplit(":", 1)[0],
+                                        "captured_at": datetime.now(timezone.utc)})
 
 
 class HttpAdapter:
@@ -74,6 +78,10 @@ class HttpAdapter:
                                                if scenario.turns else {})},
                                       headers={"Idempotency-Key": request_id})
         evidence = Evidence.model_validate(body)
+        evidence.source = "live_capture"
+        evidence.case_id = scenario.id
+        evidence.run_id = request_id.rsplit(":", 1)[0]
+        evidence.captured_at = evidence.captured_at or datetime.now(timezone.utc)
         evidence.latency_ms = (time.monotonic() - started) * 1000
         return evidence
 
@@ -121,7 +129,9 @@ class LegalRagAdapter(HttpAdapter):
                 except (KeyError, IndexError):
                     ready = False
                 if ready and report and isinstance(report, dict) and "error" not in report:
-                    return Evidence(output=report, simulated=False, external_run_id=workflow_id,
+                    return Evidence(output=report, simulated=False, source="live_capture",
+                                    case_id=scenario.id, run_id=request_id.rsplit(":", 1)[0],
+                                    captured_at=datetime.now(timezone.utc), external_run_id=workflow_id,
                                     latency_ms=(time.monotonic() - started) * 1000)
                 if state == "COMPLETED":
                     raise ExecutionFailure("Workflow completed but its report is unavailable from the target API")

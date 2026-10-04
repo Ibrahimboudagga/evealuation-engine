@@ -61,6 +61,34 @@ def audit(db, context, action, entity_type, entity_id, project_id):
         entity_type=entity_type, entity_id=entity_id, project_id=project_id, created_at=now()))
 
 
+def validate_suite_content(content):
+    """Return parsed scenarios and stable row/field errors without persisting input."""
+    scenarios, scenario_rows, errors = [], [], []
+    for row, line in enumerate(content.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            scenarios.append(Scenario.model_validate_json(line))
+            scenario_rows.append(row)
+        except ValidationError as error:
+            for item in error.errors(include_url=False, include_context=False, include_input=False):
+                errors.append({"row": row, "field": ".".join(map(str, item.get("loc", ()))) or "$",
+                               "message": item["msg"]})
+        except ValueError:
+            errors.append({"row": row, "field": "$", "message": "Invalid JSON"})
+    ids = {}
+    for row, scenario in zip(scenario_rows, scenarios):
+        if scenario.id in ids:
+            errors.append({"row": row, "field": "id",
+                           "message": f"Duplicate scenario ID also appears in parsed row {ids[scenario.id]}"})
+        ids.setdefault(scenario.id, row)
+    if not scenarios and not errors:
+        errors.append({"row": 1, "field": "$", "message": "Upload at least one scenario"})
+    if len(scenarios) > 1000:
+        errors.append({"row": 1001, "field": "$", "message": "A suite may contain at most 1000 scenarios"})
+    return scenarios, errors
+
+
 def suite_payload(suite, include_content=False):
     data = {key: getattr(suite, key) for key in
             ("id", "project_id", "name", "version", "sha256", "created_at")}
@@ -96,15 +124,27 @@ def run_payload(run, include_results=True):
 
 
 class ScenarioService:
+    def preview_suite(self, content):
+        if len(content.encode("utf-8")) > 5_000_000:
+            return {"valid": False, "case_count": 0, "errors": [
+                {"row": 1, "field": "$", "message": "Scenario suite upload must be at most 5 MB"}]}
+        scenarios, errors = validate_suite_content(content)
+        payload = [scenario.model_dump(mode="json") for scenario in scenarios]
+        if not errors and redact(payload) != payload:
+            errors.append({"row": 1, "field": "$",
+                           "message": "Remove credential-bearing fields or text before uploading"})
+        return {"valid": not errors, "case_count": len(scenarios), "errors": errors,
+                "preview": payload[:10], "truncated": len(payload) > 10}
+
     def create_suite(self, context, project_id, name, content):
         if len(content.encode('utf-8')) > 5_000_000:
             raise ValueError('Scenario suite upload must be at most 5 MB.')
-        scenarios = [Scenario.model_validate_json(line) for line in content.splitlines() if line.strip()]
-        if not scenarios or len(scenarios) > 1000 or len({s.id for s in scenarios}) != len(scenarios):
-            raise ValueError("Upload 1–1000 scenarios with unique IDs.")
+        preview = self.preview_suite(content)
+        if not preview["valid"]:
+            first = preview["errors"][0]
+            raise ValueError(f"Row {first['row']}, field {first['field']}: {first['message']}")
+        scenarios, _ = validate_suite_content(content)
         scenario_payload = [s.model_dump(mode="json") for s in scenarios]
-        if redact(scenario_payload) != scenario_payload:
-            raise ValueError("Remove credential-bearing fields or text from the scenario suite before uploading.")
         canonical = encoded(scenario_payload)
         UsageService().assert_capacity(context.workspace_id, storage_bytes=len(canonical.encode("utf-8")))
         with get_db() as db:
@@ -134,8 +174,12 @@ class ScenarioService:
             else:
                 try:
                     observed = Evidence.model_validate(evidence[scenario.id])
+                    if observed.case_id is not None and observed.case_id != scenario.id:
+                        raise ValueError("Evidence case_id does not match its suite key")
+                    observed.case_id = scenario.id
+                    observed.source = "imported"
                     result = scoring.evaluate(scenario, observed)
-                except ValidationError:
+                except (ValidationError, ValueError):
                     result = ScenarioResult(scenario_id=scenario.id, outcome="evaluation_error",
                         decision="inconclusive", simulated=evidence[scenario.id].get("simulated") is True,
                         error_message="Submitted evidence does not match the versioned trace contract")
