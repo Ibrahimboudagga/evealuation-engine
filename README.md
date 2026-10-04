@@ -11,9 +11,23 @@ The repository currently targets controlled agency pilots. It includes a FastAPI
 
 > **Measurement principle:** a completed run means processing finished. It does not mean the AI passed. Release decisions use coverage, valid quality results, explicit thresholds, and compatibility checks.
 
+## The pilot offer
+
+Evaluation Engine is built for an agency validating one client AI feature or one bounded agent workflow before release. The agency supplies a versioned set of representative cases and explicit acceptance rules. The engine executes or imports the observations, preserves the run configuration, separates quality failures from infrastructure failures, and compares the candidate with an approved baseline.
+
+| The agency connects | The engine produces | The release owner decides |
+| --- | --- | --- |
+| A prompt-to-answer feature, model pair, or instrumented staging workflow | Coverage, valid quality measurements, errors, latency/token evidence, and example-level explanations | `passed`, `regressed`, or `inconclusive` under an immutable project policy |
+
+A useful first pilot starts with 10–100 reviewed cases, one baseline, one candidate change, and a policy that states the required coverage and acceptable quality drop. The report is designed to answer four questions: **What changed? Did quality improve? Which cases failed? Is the evidence complete enough to release?**
+
+The engine evaluates declared behavior against captured evidence. It does not claim that an LLM judge is ground truth, that an imported trace proves its own origin, or that passing declared checks proves the entire application is safe.
+
 ## Contents
 
+- [The pilot offer](#the-pilot-offer)
 - [What it evaluates](#what-it-evaluates)
+- [Choose an evaluation path](#choose-an-evaluation-path)
 - [Why agencies can use it](#why-agencies-can-use-it)
 - [How it works](#how-it-works)
 - [Five-minute local demo](#five-minute-local-demo)
@@ -37,6 +51,17 @@ The repository currently targets controlled agency pilots. It includes a FastAPI
 | **Agent and application scenarios** | Tool-using agents and the AI layer of an application or SaaS | Assertions over outputs, tool traces, retrieval evidence, state changes, side effects, multi-turn behavior, latency, and token checks |
 
 The scenario path evaluates observable behavior against a declared contract. It can verify, for example, that an agent called an approved retrieval tool, returned required citations, avoided a forbidden side effect, updated state correctly, and completed within a latency budget. It does not automatically prove security, legal correctness, business value, or the truth of evidence supplied by the target application.
+
+## Choose an evaluation path
+
+| If you need to answer… | Start with | Use a release gate when… |
+| --- | --- | --- |
+| “Does this version answer our reviewed cases correctly?” | Single-model evaluation | The dataset, evaluator configuration, and baseline are compatible |
+| “Which of these two responses is better?” | Pairwise evaluation | Judge parsing succeeded and enough valid comparisons exist |
+| “Did the agent complete the task with the expected tools and side effects?” | Agent/application scenarios | The trace is complete and every required observation is available |
+| “Can we demonstrate the workflow without provider credentials?” | Explicit mock provider and seeded demo | Never—simulated results remain visibly simulated |
+
+Use deterministic checks for facts, state changes, calculations, tool arguments, and known outputs. Use judge-based scoring for subjective qualities only when its prompt, model, rubric, and limitations are recorded. Missing evidence produces an inconclusive result rather than an assumed pass.
 
 ## Why agencies can use it
 
@@ -314,11 +339,11 @@ tests/          Unit, integration, migration, security, and workflow tests
 | --- | --- |
 | [DEMO_GUIDE.md](DEMO_GUIDE.md) | The short agency mock demonstration |
 | [PILOT_PRODUCT_SCOPE.md](PILOT_PRODUCT_SCOPE.md) | First paid-pilot buyer, workflow, inputs, outputs, claims, and data boundary |
+| [PILOT_REHEARSAL.md](PILOT_REHEARSAL.md) | Evidence-driven pilot workflow and operational rehearsal |
 | [SCENARIO_EVALUATION.md](SCENARIO_EVALUATION.md) | Scenario schema, trace contracts, adapters, and reference projects |
 | [PROJECT_DEEP_DIVE.md](PROJECT_DEEP_DIVE.md) | Detailed system architecture and feature inventory |
 | [PROJECT_DOCUMENTATION.md](PROJECT_DOCUMENTATION.md) | Extended API and implementation documentation |
 | [HOSTED_PILOT_ONBOARDING.md](HOSTED_PILOT_ONBOARDING.md) | Hosted pilot setup checklist |
-| [PILOT_REHEARSAL.md](PILOT_REHEARSAL.md) | End-to-end operational rehearsal |
 | [TESTING.md](TESTING.md) | Test environment and recorded dependency versions |
 | [CI_CD.md](CI_CD.md) | Pipeline stages, image publication, and release operations |
 | [REANALYSIS_REMEDIATION.md](REANALYSIS_REMEDIATION.md) | Latest feedback response, verification evidence, and remaining gaps |
