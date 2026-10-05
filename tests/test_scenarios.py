@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import hmac
 import json
 
 import httpx
@@ -180,6 +182,37 @@ async def test_http_success_preserves_target_simulation_label(tmp_path):
                                   transport=httpx.MockTransport(handle)), tmp_path / "success")
     assert manifest["simulated"] and manifest["metrics"]["pass_rate"] == 1
     assert "hidden" not in (tmp_path / "success" / "manifest.json").read_text()
+
+
+@pytest.mark.asyncio
+async def test_http_signed_v2_evidence_is_request_bound_and_attributed(tmp_path):
+    secret = "test-signing-secret"
+    def handle(request):
+        request_id = json.loads(request.content)["request_id"]
+        body = json.dumps({"schema_version": 2, "request_id": request_id,
+            "output": {"answer": "yes"}, "simulated": False}).encode()
+        signature = hmac.new(secret.encode(), request_id.encode() + b"." + body, hashlib.sha256).hexdigest()
+        return httpx.Response(200, content=body, headers={"Content-Type": "application/json",
+                                                         "X-Evaluation-Signature": signature})
+    adapter = HttpAdapter("https://target.test/evaluate", transport=httpx.MockTransport(handle),
+        response_signing_secret=secret, session_id="deployment-session",
+        target={"provider": "customer-app", "application_version": "git:abc"},
+        evaluator_versions={"bridge": "v2"})
+    manifest = await run_scenarios([scenario()], adapter, tmp_path / "signed")
+    row = json.loads((tmp_path / "signed" / "results.jsonl").read_text())
+    assert manifest["metrics"]["valid_evaluations"] == 1
+    assert row["evidence"]["session_id"] == "deployment-session"
+
+
+@pytest.mark.asyncio
+async def test_http_rejects_bad_evidence_signature(tmp_path):
+    def handle(request):
+        return httpx.Response(200, json={"output": {"answer": "yes"}, "simulated": False},
+                              headers={"X-Evaluation-Signature": "bad"})
+    adapter = HttpAdapter("https://target.test/evaluate", transport=httpx.MockTransport(handle),
+                          response_signing_secret="secret")
+    manifest = await run_scenarios([scenario()], adapter, tmp_path / "bad-signature")
+    assert manifest["metrics"]["generation_errors"] == 1
 
 
 @pytest.mark.asyncio

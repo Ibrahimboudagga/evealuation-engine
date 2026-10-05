@@ -42,6 +42,11 @@ def evaluate(scenario: Scenario, evidence: Evidence) -> ScenarioResult:
             actual = getattr(evidence, field)
             check(field + "_budget", actual <= budget if actual is not None else None,
                   "Measured value must be available and within the configured budget")
+    if scenario.max_cost is not None:
+        usage = evidence.usage
+        comparable = usage is not None and usage.cost is not None and usage.currency == scenario.cost_currency
+        check("cost_budget", usage.cost <= scenario.max_cost if comparable else None,
+              "Measured or estimated cost must use the configured currency and remain within budget")
     if scenario.schedule is not None:
         policy = scenario.schedule
         output = evidence.output

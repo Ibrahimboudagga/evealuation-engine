@@ -1,0 +1,14 @@
+{
+  "provider": "replace-with-provider",
+  "model": "replace-with-judge-model",
+  "model_version": "replace-with-immutable-model-version",
+  "prompt_version": "judge-prompt-v1",
+  "prompt_sha256": "d801019ab6511f969d52f83161b3dce7d7ddbf3141c4d98de129299f04ca0eb1",
+  "rubric_version": "rubric-v1",
+  "rubric_sha256": "f488a7c705baf5a694646d8cd62d71d5d5d44d6d8d1235e0b554d0f00275b6d7",
+  "label_set_version": "labels-v1",
+  "adjudication_version": "adjudication-v1",
+  "parameters": {
+    "temperature": 0
+  }
+}

@@ -1,0 +1,1 @@
+Classify the observed evaluation evidence using the versioned rubric. Return exactly one allowed label and do not infer missing evidence.

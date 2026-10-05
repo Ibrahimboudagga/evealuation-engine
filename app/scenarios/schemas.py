@@ -157,6 +157,8 @@ class Scenario(StrictModel):
     max_tool_calls: int | None = Field(default=None, ge=0)
     max_latency_ms: float | None = Field(default=None, ge=0)
     max_total_tokens: int | None = Field(default=None, ge=0)
+    max_cost: float | None = Field(default=None, ge=0)
+    cost_currency: str | None = Field(default=None, min_length=3, max_length=3)
     schedule: ScheduleExpectation | None = None
     tool_expectations: list[ToolExpectation] = Field(default_factory=list, max_length=100)
     tool_order: list[str] = Field(default_factory=list, max_length=100)
@@ -169,6 +171,8 @@ class Scenario(StrictModel):
 
     @model_validator(mode="after")
     def validate_checks(self):
+        if (self.max_cost is None) != (self.cost_currency is None):
+            raise ValueError("Cost budgets require both max_cost and cost_currency")
         if set(self.required_tools) & set(self.forbidden_tools) or {t.tool_name for t in self.tool_expectations} & set(self.forbidden_tools):
             raise ValueError("A tool cannot be both required and forbidden")
         if len({a.name for a in self.assertions}) != len(self.assertions):
@@ -179,7 +183,7 @@ class Scenario(StrictModel):
                 or self.expected_citation_ids or self.tool_expectations or self.tool_order
                 or self.retrieval or self.grounding or self.state_checks or self.side_effect_policy
                 or self.turns or self.revenue_ops or any(x is not None for x in
-                (self.max_tool_calls, self.max_latency_ms, self.max_total_tokens))):
+                (self.max_tool_calls, self.max_latency_ms, self.max_total_tokens, self.max_cost))):
             raise ValueError("At least one explicit evaluation check is required")
         return self
 
@@ -214,6 +218,12 @@ class TargetIdentity(StrictModel):
     application_version: str | None = None
     prompt_template_version: str | None = None
     parameters: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def identifies_build(self):
+        if not (self.application_version or (self.provider and self.model and self.model_version)):
+            raise ValueError("Target identity requires an application version or provider/model/model version")
+        return self
 
 
 class UsageEvidence(StrictModel):
@@ -316,10 +326,30 @@ class Evidence(StrictModel):
         step_ids = {c.step_id for c in self.tool_calls or [] if c.step_id}
         if any(c.parent_step_id and c.parent_step_id not in step_ids for c in self.tool_calls or []):
             raise ValueError("Tool-call parent_step_id must reference a step in the same trace")
+        calls_by_id = {c.step_id: c for c in self.tool_calls or [] if c.step_id}
+        for call in self.tool_calls or []:
+            if call.parent_step_id:
+                parent = calls_by_id[call.parent_step_id]
+                if call.sequence is not None and parent.sequence is not None and parent.sequence >= call.sequence:
+                    raise ValueError("Tool-call parents must precede their children")
+                seen = {call.step_id}
+                cursor = parent
+                while cursor.parent_step_id:
+                    if cursor.parent_step_id in seen:
+                        raise ValueError("Tool-call parent relationships cannot contain cycles")
+                    seen.add(cursor.parent_step_id)
+                    cursor = calls_by_id[cursor.parent_step_id]
         for field in ("sequence", "id"):
             values = [getattr(t, field) for t in self.turns or []]
             if len(values) != len(set(values)):
                 raise ValueError("Turn sequence and IDs must be unique")
+        if self.usage and self.total_tokens is not None and self.usage.total_tokens is not None:
+            if self.total_tokens != self.usage.total_tokens:
+                raise ValueError("Evidence total_tokens must match usage.total_tokens")
+        if self.schema_version == 2 and self.source in ("fixture", "live_capture"):
+            required = (self.case_id, self.run_id, self.session_id, self.captured_at, self.target)
+            if any(value is None for value in required) or not self.evaluator_versions:
+                raise ValueError("Authoritative schema-v2 evidence requires case, run, session, capture time, target, and evaluator versions")
         return self
 
 

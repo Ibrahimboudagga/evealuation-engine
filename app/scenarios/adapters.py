@@ -1,6 +1,8 @@
 """Trusted operator-configured adapters; do not expose URL selection to public users."""
 
 import asyncio
+import hashlib
+import hmac
 import time
 from datetime import datetime, timezone
 from typing import Protocol
@@ -40,7 +42,9 @@ class FixtureAdapter:
 class HttpAdapter:
     simulated = False
 
-    def __init__(self, url: str, token: str | None = None, *, transport=None):
+    def __init__(self, url: str, token: str | None = None, *, transport=None,
+                 response_signing_secret: str | None = None, target=None,
+                 evaluator_versions: dict[str, str] | None = None, session_id: str | None = None):
         parsed = urlsplit(url)
         if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
             raise ValueError("Use an HTTP(S) endpoint without credentials, query, or fragment")
@@ -49,15 +53,26 @@ class HttpAdapter:
         self.url = url.rstrip("/")
         self.token = token
         self.transport = transport
+        self.response_signing_secret = response_signing_secret.encode() if response_signing_secret else None
+        self.target = target
+        self.evaluator_versions = evaluator_versions or {}
+        self.session_id = session_id
 
     def client(self):
         return httpx.AsyncClient(transport=self.transport, follow_redirects=False, timeout=30,
                                 headers={"Authorization": "Bearer " + self.token} if self.token else {})
 
-    async def request(self, client, method, url, **kwargs):
+    async def request(self, client, method, url, *, signature_context=None, **kwargs):
         try:
             response = await client.request(method, url, **kwargs)
             response.raise_for_status()
+            if self.response_signing_secret is not None:
+                signature = response.headers.get("X-Evaluation-Signature", "")
+                expected = hmac.new(self.response_signing_secret,
+                    ((signature_context or "") + ".").encode() + response.content,
+                    hashlib.sha256).hexdigest()
+                if not hmac.compare_digest(signature, expected):
+                    raise ExecutionFailure("Target evidence signature verification failed")
             return response.json()
         except httpx.HTTPStatusError as exc:
             raise ExecutionFailure(f"Target returned HTTP {exc.response.status_code}") from None
@@ -76,12 +91,20 @@ class HttpAdapter:
                                             "task": scenario.task, "inputs": scenario.inputs,
                                             **({"turns": [{"id": t.id, "input": t.input} for t in scenario.turns]}
                                                if scenario.turns else {})},
-                                      headers={"Idempotency-Key": request_id})
-        evidence = Evidence.model_validate(body)
-        evidence.source = "live_capture"
-        evidence.case_id = scenario.id
-        evidence.run_id = request_id.rsplit(":", 1)[0]
-        evidence.captured_at = evidence.captured_at or datetime.now(timezone.utc)
+                                      headers={"Idempotency-Key": request_id}, signature_context=request_id)
+        if not isinstance(body, dict):
+            raise ExecutionFailure("Target returned an invalid evidence document")
+        if self.response_signing_secret is not None and body.get("request_id") != request_id:
+            raise ExecutionFailure("Signed target evidence does not match the request")
+        canonical = {**body, "source": "live_capture", "case_id": scenario.id,
+                     "run_id": request_id.rsplit(":", 1)[0],
+                     "captured_at": body.get("captured_at") or datetime.now(timezone.utc)}
+        canonical.pop("request_id", None)
+        if canonical.get("schema_version") == 2:
+            canonical.setdefault("session_id", self.session_id)
+            canonical.setdefault("target", self.target)
+            canonical.setdefault("evaluator_versions", self.evaluator_versions)
+        evidence = Evidence.model_validate(canonical)
         evidence.latency_ms = (time.monotonic() - started) * 1000
         return evidence
 
